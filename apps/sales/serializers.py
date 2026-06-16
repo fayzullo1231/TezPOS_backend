@@ -191,5 +191,16 @@ class SyncSaleSerializer(serializers.Serializer):
         if existing:
             return existing
 
-        validated_data["client_id"] = client_id
-        return SaleSerializer(context=self.context).create(validated_data)
+        created_at = validated_data.pop("created_at", None)
+        shift = (
+            request.user.shifts.filter(status="open").order_by("-opened_at").first()
+        )
+        payload = {**validated_data, "client_id": client_id}
+        if shift:
+            payload["shift"] = shift
+
+        sale = SaleSerializer(context=self.context).create(payload)
+        if created_at:
+            sale.completed_at = created_at
+            sale.save(update_fields=["completed_at"])
+        return sale

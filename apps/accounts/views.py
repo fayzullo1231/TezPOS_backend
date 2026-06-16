@@ -217,10 +217,6 @@ class ShiftPreviewView(APIView):
 
 class ShiftOpenView(APIView):
     def post(self, request):
-        serializer = ShiftOpenSerializer(data=request.data)
-        serializer.is_valid(raise_exception=True)
-        data = serializer.validated_data
-
         existing = Shift.objects.filter(
             tenant=request.user.tenant,
             user=request.user,
@@ -229,11 +225,12 @@ class ShiftOpenView(APIView):
         if existing:
             return Response(ShiftSerializer(existing).data)
 
+        opening_cash, opening_terminal = suggested_opening_balances(request.user.tenant)
         shift = Shift.objects.create(
             tenant=request.user.tenant,
             user=request.user,
-            opening_cash=data.get("opening_cash", 0),
-            opening_terminal=data.get("opening_terminal", 0),
+            opening_cash=opening_cash,
+            opening_terminal=opening_terminal,
         )
         return Response(ShiftSerializer(shift).data, status=status.HTTP_201_CREATED)
 

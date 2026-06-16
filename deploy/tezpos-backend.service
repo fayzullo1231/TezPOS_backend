@@ -1,0 +1,21 @@
+[Unit]
+Description=TezPOS Django Backend (Gunicorn)
+After=network.target
+
+[Service]
+Type=simple
+User=tezpos
+Group=tezpos
+WorkingDirectory=/opt/tezpos-backend
+EnvironmentFile=/opt/tezpos-backend/.env
+ExecStart=/opt/tezpos-backend/venv/bin/gunicorn tezpos.wsgi:application \
+    --bind 0.0.0.0:8000 \
+    --workers 3 \
+    --timeout 120 \
+    --access-logfile - \
+    --error-logfile -
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

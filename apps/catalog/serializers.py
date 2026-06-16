@@ -247,25 +247,59 @@ class ProductSerializer(serializers.ModelSerializer):
                 defaults={"price": price},
             )
 
+    def _parse_barcodes_raw(self, raw):
+        """Multipart/JSON dan kelgan barcodes ni ro'yxatga aylantiradi."""
+        import json
+
+        if raw is None:
+            return None
+        if isinstance(raw, list):
+            return raw
+        if isinstance(raw, (int, float)):
+            return [str(raw)]
+        if isinstance(raw, str):
+            stripped = raw.strip()
+            if not stripped:
+                return []
+            if stripped.startswith("["):
+                try:
+                    parsed = json.loads(stripped)
+                except json.JSONDecodeError:
+                    return [raw]
+                if isinstance(parsed, list):
+                    return parsed
+                if isinstance(parsed, (int, float)):
+                    return [str(parsed)]
+                return [raw]
+            return [raw]
+        if hasattr(raw, "__iter__") and not isinstance(raw, (str, bytes)):
+            return list(raw)
+        return [str(raw)]
+
     def _coerce_request_data(self, data):
-        """QueryDict ichiga list/dict yozish DRF multipart validatsiyasini buzadi."""
+        """QueryDict ni oddiy dict ga; barcodes uchun getlist."""
         if not hasattr(data, "get"):
             return data
-        if hasattr(data, "keys"):
-            return {key: data.get(key) for key in data.keys()}
-        return dict(data)
+        if not hasattr(data, "keys"):
+            return dict(data)
+        result = {}
+        for key in data.keys():
+            if key == "barcodes" and hasattr(data, "getlist"):
+                result[key] = data.getlist("barcodes")
+            elif hasattr(data, "getlist"):
+                values = data.getlist(key)
+                result[key] = values[0] if len(values) == 1 else values
+            else:
+                result[key] = data.get(key)
+        return result
 
     def run_validation(self, data=serializers.empty):
         if data is not serializers.empty and hasattr(data, "get"):
             import json
 
             data = self._coerce_request_data(data)
-            raw = data.get("barcodes")
-            if isinstance(raw, str):
-                try:
-                    data["barcodes"] = json.loads(raw)
-                except json.JSONDecodeError:
-                    data["barcodes"] = [raw]
+            if "barcodes" in data:
+                data["barcodes"] = self._parse_barcodes_raw(data.get("barcodes"))
             raw_lp = data.get("list_prices")
             if isinstance(raw_lp, str) and str(raw_lp).strip():
                 try:
@@ -279,14 +313,9 @@ class ProductSerializer(serializers.ModelSerializer):
     def _parse_barcodes(self, raw_codes, primary: str = "") -> list[str]:
         codes: list[str] = []
         if raw_codes is not None:
-            if isinstance(raw_codes, str):
-                import json
-
-                try:
-                    raw_codes = json.loads(raw_codes)
-                except json.JSONDecodeError:
-                    raw_codes = [raw_codes]
-            codes = [normalize_barcode(c) for c in raw_codes if normalize_barcode(c)]
+            parsed = self._parse_barcodes_raw(raw_codes)
+            if parsed:
+                codes = [normalize_barcode(c) for c in parsed if normalize_barcode(c)]
         primary = normalize_barcode(primary)
         if primary and primary not in codes:
             codes.insert(0, primary)

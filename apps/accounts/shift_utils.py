@@ -45,22 +45,31 @@ def compute_shift_summary(shift: Shift) -> dict:
             transaction_type=CashTransaction.TYPE_INCOME,
         ).aggregate(s=Sum("amount"))["s"]
     )
-    cash_out = _dec(
-        CashTransaction.objects.filter(
-            shift=shift,
-            tenant=tenant,
-            transaction_type__in=[
-                CashTransaction.TYPE_EXPENSE,
-                CashTransaction.TYPE_TRANSFER,
-            ],
-        ).aggregate(s=Sum("amount"))["s"]
+    expense_qs = CashTransaction.objects.filter(
+        shift=shift,
+        tenant=tenant,
+        transaction_type__in=[
+            CashTransaction.TYPE_EXPENSE,
+            CashTransaction.TYPE_TRANSFER,
+        ],
     )
+    cash_out_cash = _dec(
+        expense_qs.filter(payment_method=CashTransaction.PAYMENT_CASH).aggregate(
+            s=Sum("amount")
+        )["s"]
+    )
+    cash_out_card = _dec(
+        expense_qs.filter(payment_method=CashTransaction.PAYMENT_CARD).aggregate(
+            s=Sum("amount")
+        )["s"]
+    )
+    cash_out = cash_out_cash + cash_out_card
 
     opening_cash = _dec(shift.opening_cash)
     opening_terminal = _dec(shift.opening_terminal)
 
-    expected_cash = opening_cash + cash_sales + cash_in - returns_total - cash_out
-    expected_terminal = opening_terminal + card_sales
+    expected_cash = opening_cash + cash_sales + cash_in - returns_total - cash_out_cash
+    expected_terminal = opening_terminal + card_sales - cash_out_card
     if expected_cash < 0:
         expected_cash = Decimal("0")
     if expected_terminal < 0:

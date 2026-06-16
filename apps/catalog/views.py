@@ -1,4 +1,5 @@
 from django.db.models import Q
+from django.db.models import Count, Max, Sum
 from django.http import HttpResponse
 from rest_framework import status, viewsets
 from rest_framework.decorators import action
@@ -12,7 +13,7 @@ from .barcode_lookup import (
 )
 from .import_excel import import_products_from_excel, preview_excel_columns
 from .template_excel import build_import_template
-from .models import Brand, Category, Product, ProductImage, Supplier, UnitOfMeasure
+from .models import Brand, Category, Product, ProductImage, ProductPrice, Supplier, UnitOfMeasure
 from .serializers import (
     BrandSerializer,
     CategorySerializer,
@@ -203,6 +204,39 @@ class ProductViewSet(TenantMixin, viewsets.ModelViewSet):
                 | Q(sku__icontains=search)
             ).distinct()
         return Response({"count": qs.count()})
+
+    @action(detail=False, methods=["get"], url_path="sync-state")
+    def sync_state(self, request):
+        """Yengil sinxron tekshiruv — boshqa kassalar narx/qoldiq o'zgarishini aniqlash."""
+        tenant = request.user.tenant
+        agg = Product.objects.filter(tenant=tenant).aggregate(
+            max_updated=Max("updated_at"),
+            total=Count("id"),
+            active_total=Count("id", filter=Q(is_active=True)),
+            qty_sum=Sum("quantity"),
+            price_sum=Sum("price"),
+        )
+        price_agg = ProductPrice.objects.filter(tenant=tenant).aggregate(
+            price_rows=Count("id"),
+            list_price_sum=Sum("price"),
+        )
+        max_updated = agg["max_updated"]
+        revision_parts = [
+            max_updated.isoformat() if max_updated else "0",
+            str(agg["total"] or 0),
+            str(agg["active_total"] or 0),
+            str(agg["qty_sum"] or "0"),
+            str(agg["price_sum"] or "0"),
+            str(price_agg["price_rows"] or 0),
+            str(price_agg["list_price_sum"] or "0"),
+        ]
+        return Response(
+            {
+                "revision": ":".join(revision_parts),
+                "updated_at": max_updated.isoformat() if max_updated else None,
+                "product_count": agg["active_total"] or 0,
+            }
+        )
 
     @action(detail=False, methods=["get"], url_path="by_barcode")
     def by_barcode(self, request):
