@@ -34,6 +34,26 @@ class UnitOfMeasureSerializer(serializers.ModelSerializer):
         read_only_fields = ["id", "created_at"]
 
 
+def _is_selling_price_list(pl) -> bool:
+    if pl.is_selling:
+        return True
+    lower = pl.name.lower()
+    return (
+        "продаж" in lower
+        or "sotuv" in lower
+        or "sotish" in lower
+        or "розниц" in lower
+    )
+
+
+def _selling_price_list_ids(tenant_id) -> set:
+    return {
+        pl.id
+        for pl in PriceList.objects.filter(tenant_id=tenant_id, is_active=True)
+        if _is_selling_price_list(pl)
+    }
+
+
 def _selling_price_list_for_tenant(tenant_id):
     selling_list = PriceList.objects.filter(
         tenant=tenant_id, is_active=True, is_selling=True
@@ -43,13 +63,7 @@ def _selling_price_list_for_tenant(tenant_id):
     for pl in PriceList.objects.filter(
         tenant=tenant_id, is_active=True
     ).order_by("sort_order", "name"):
-        lower = pl.name.lower()
-        if (
-            "продаж" in lower
-            or "sotuv" in lower
-            or "sotish" in lower
-            or "розниц" in lower
-        ):
+        if _is_selling_price_list(pl):
             return pl
     return None
 
@@ -178,9 +192,10 @@ class ProductSerializer(serializers.ModelSerializer):
         return data
 
     def _active_price_lists(self, tenant):
+        selling_ids = _selling_price_list_ids(tenant.id)
         return PriceList.objects.filter(
             tenant=tenant, is_active=True, is_selling=False
-        ).order_by("sort_order", "name")
+        ).exclude(id__in=selling_ids).order_by("sort_order", "name")
 
     def _parse_list_prices(self, raw) -> dict[str, Decimal]:
         if raw is None:
