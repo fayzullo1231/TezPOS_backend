@@ -21,5 +21,5 @@ urlpatterns = [
     path("<str:server_name>/product/", TenantProductListView.as_view(), name="tenant-products"),
 ]
 
-if settings.DEBUG:
-    urlpatterns += static(settings.MEDIA_URL, document_root=settings.MEDIA_ROOT)
+# Mahsulot rasmlari productionda ham ochiq (DEBUG=false bo'lsa ham).
+urlpatterns += static(settings.MEDIA_URL, document_root=settings.MEDIA_ROOT)
