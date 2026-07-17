@@ -52,9 +52,27 @@ def sync_product_barcodes(product: Product, codes: list[str]) -> None:
         return
 
     for code in normalized:
-        existing = ProductBarcode.objects.filter(tenant=tenant, code=code).first()
+        existing = ProductBarcode.objects.filter(tenant=tenant, code=code).select_related(
+            "product"
+        ).first()
         if existing and existing.product_id != product.id:
-            raise ValueError(f"Shtrix kod boshqa mahsulotda: {code}")
+            other = existing.product
+            other_name = (other.name or "").strip() or f"#{other.id}"
+            raise ValueError(
+                f"Shtrix kod {code} — «{other_name}» mahsulotida bor"
+            )
+
+        # Asosiy barcode maydonida ham bo'lishi mumkin
+        other_primary = (
+            Product.objects.filter(tenant=tenant, barcode=code)
+            .exclude(id=product.id)
+            .first()
+        )
+        if other_primary:
+            other_name = (other_primary.name or "").strip() or f"#{other_primary.id}"
+            raise ValueError(
+                f"Shtrix kod {code} — «{other_name}» mahsulotida bor"
+            )
 
     ProductBarcode.objects.filter(product=product).exclude(code__in=normalized).delete()
 
