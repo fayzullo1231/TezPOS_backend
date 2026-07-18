@@ -41,6 +41,14 @@ class SaleSerializer(serializers.ModelSerializer):
     items = SaleItemSerializer(many=True)
     customer = serializers.PrimaryKeyRelatedField(read_only=True)
     customer_id = serializers.UUIDField(write_only=True, required=False, allow_null=True)
+    customer_debt_before = serializers.DecimalField(
+        max_digits=14,
+        decimal_places=2,
+        write_only=True,
+        required=False,
+        allow_null=True,
+        min_value=Decimal("0"),
+    )
     customer_debt_balance = serializers.SerializerMethodField()
 
     class Meta:
@@ -50,6 +58,7 @@ class SaleSerializer(serializers.ModelSerializer):
             "client_id",
             "customer",
             "customer_id",
+            "customer_debt_before",
             "customer_debt_balance",
             "customer_name",
             "status",
@@ -87,6 +96,7 @@ class SaleSerializer(serializers.ModelSerializer):
         user = validated_data.pop("user", None) or request.user
         shift = validated_data.pop("shift", None)
         customer_id = validated_data.pop("customer_id", None)
+        customer_debt_before = validated_data.pop("customer_debt_before", None)
 
         with transaction.atomic():
             customer = None
@@ -181,7 +191,15 @@ class SaleSerializer(serializers.ModelSerializer):
                 and sale.status == Sale.STATUS_COMPLETED
                 and sale.debt_amount > 0
             ):
-                customer.debt = (customer.debt or Decimal("0")) + sale.debt_amount
+                saved_debt = customer.debt or Decimal("0")
+                # Eski desktop versiyalar qarzni faqat localStorage'da saqlagan.
+                # Birinchi yangi sotuvda o'sha qoldiqni yo'qotmasdan serverga ko'chiramiz.
+                if (
+                    customer_debt_before is not None
+                    and customer_debt_before > saved_debt
+                ):
+                    saved_debt = customer_debt_before
+                customer.debt = saved_debt + sale.debt_amount
                 customer.save(update_fields=["debt"])
                 sale.customer = customer
 
@@ -216,6 +234,13 @@ class SyncSaleSerializer(serializers.Serializer):
     client_id = serializers.CharField(max_length=64)
     customer_name = serializers.CharField(required=False, allow_blank=True, default="")
     customer_id = serializers.UUIDField(required=False, allow_null=True)
+    customer_debt_before = serializers.DecimalField(
+        max_digits=14,
+        decimal_places=2,
+        required=False,
+        allow_null=True,
+        min_value=Decimal("0"),
+    )
     payment_type = serializers.ChoiceField(choices=Sale.PAYMENT_CHOICES, default="cash")
     paid_amount = serializers.DecimalField(
         max_digits=14, decimal_places=2, required=False, allow_null=True
