@@ -1,7 +1,7 @@
 from django.conf import settings
-from django.conf.urls.static import static
 from django.contrib import admin
-from django.urls import include, path
+from django.urls import include, path, re_path
+from django.views.static import serve
 
 from apps.catalog.tenant_views import TenantProductListView
 from apps.sales.public_check import PublicReceiptCheckView
@@ -21,5 +21,12 @@ urlpatterns = [
     path("<str:server_name>/product/", TenantProductListView.as_view(), name="tenant-products"),
 ]
 
-# Mahsulot rasmlari productionda ham ochiq (DEBUG=false bo'lsa ham).
-urlpatterns += static(settings.MEDIA_URL, document_root=settings.MEDIA_ROOT)
+# DEBUG=false da django.conf.urls.static.static() hech narsa qo'shmaydi —
+# shuning uchun media ni doim serve orqali ochiq qilamiz (gunicorn :8000).
+urlpatterns += [
+    re_path(
+        r"^media/(?P<path>.*)$",
+        serve,
+        {"document_root": settings.MEDIA_ROOT},
+    ),
+]
