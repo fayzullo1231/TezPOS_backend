@@ -39,6 +39,9 @@ class SaleItemSerializer(serializers.ModelSerializer):
 
 class SaleSerializer(serializers.ModelSerializer):
     items = SaleItemSerializer(many=True)
+    customer = serializers.PrimaryKeyRelatedField(read_only=True)
+    customer_id = serializers.UUIDField(write_only=True, required=False, allow_null=True)
+    customer_debt_balance = serializers.SerializerMethodField()
 
     class Meta:
         model = Sale
@@ -46,6 +49,8 @@ class SaleSerializer(serializers.ModelSerializer):
             "id",
             "client_id",
             "customer",
+            "customer_id",
+            "customer_debt_balance",
             "customer_name",
             "status",
             "payment_type",
@@ -67,7 +72,13 @@ class SaleSerializer(serializers.ModelSerializer):
             "total",
             "created_at",
             "completed_at",
+            "customer_debt_balance",
         ]
+
+    def get_customer_debt_balance(self, obj):
+        if not obj.customer_id or not obj.customer:
+            return None
+        return f"{obj.customer.debt:.2f}"
 
     def create(self, validated_data):
         items_data = validated_data.pop("items", [])
@@ -75,8 +86,37 @@ class SaleSerializer(serializers.ModelSerializer):
         tenant = request.user.tenant
         user = validated_data.pop("user", None) or request.user
         shift = validated_data.pop("shift", None)
+        customer_id = validated_data.pop("customer_id", None)
 
         with transaction.atomic():
+            customer = None
+            if customer_id:
+                customer = (
+                    Customer.objects.select_for_update()
+                    .filter(id=customer_id, tenant=tenant)
+                    .first()
+                )
+                if customer is None:
+                    raise serializers.ValidationError(
+                        {"customer_id": "Mijoz topilmadi yoki boshqa serverga tegishli."}
+                    )
+            elif validated_data.get("payment_type") == Sale.PAYMENT_CREDIT:
+                customer_name = (validated_data.get("customer_name") or "").strip()
+                if customer_name:
+                    customer = (
+                        Customer.objects.select_for_update()
+                        .filter(tenant=tenant, name__iexact=customer_name)
+                        .first()
+                    )
+                if customer is None:
+                    raise serializers.ValidationError(
+                        {"customer_id": "Qarzga sotish uchun mijozni tanlang."}
+                    )
+
+            if customer:
+                validated_data["customer"] = customer
+                validated_data["customer_name"] = customer.name
+
             last = (
                 Sale.objects.filter(tenant=tenant)
                 .order_by("-receipt_number")
@@ -136,6 +176,15 @@ class SaleSerializer(serializers.ModelSerializer):
                 sale.synced_at = timezone.now()
             sale.save()
 
+            if (
+                customer
+                and sale.status == Sale.STATUS_COMPLETED
+                and sale.debt_amount > 0
+            ):
+                customer.debt = (customer.debt or Decimal("0")) + sale.debt_amount
+                customer.save(update_fields=["debt"])
+                sale.customer = customer
+
         return sale
 
 
@@ -166,6 +215,7 @@ class SaleListSerializer(serializers.ModelSerializer):
 class SyncSaleSerializer(serializers.Serializer):
     client_id = serializers.CharField(max_length=64)
     customer_name = serializers.CharField(required=False, allow_blank=True, default="")
+    customer_id = serializers.UUIDField(required=False, allow_null=True)
     payment_type = serializers.ChoiceField(choices=Sale.PAYMENT_CHOICES, default="cash")
     paid_amount = serializers.DecimalField(
         max_digits=14, decimal_places=2, required=False, allow_null=True
