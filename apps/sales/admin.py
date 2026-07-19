@@ -1,6 +1,13 @@
 from django.contrib import admin
 
-from .models import Customer, Sale, SaleItem, SaleReturn, SaleReturnItem
+from .models import (
+    Customer,
+    CustomerDebtPayment,
+    Sale,
+    SaleItem,
+    SaleReturn,
+    SaleReturnItem,
+)
 
 
 class SaleItemInline(admin.TabularInline):
@@ -28,3 +35,16 @@ class SaleReturnAdmin(admin.ModelAdmin):
 @admin.register(Customer)
 class CustomerAdmin(admin.ModelAdmin):
     list_display = ["name", "tenant", "phone", "debt"]
+
+
+@admin.register(CustomerDebtPayment)
+class CustomerDebtPaymentAdmin(admin.ModelAdmin):
+    list_display = [
+        "receipt_number",
+        "customer",
+        "amount",
+        "balance_after",
+        "payment_type",
+        "created_at",
+    ]
+    list_filter = ["payment_type"]
