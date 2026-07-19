@@ -7,7 +7,7 @@ from decimal import Decimal
 from django.db import transaction
 from django.db.models import Sum
 
-from .models import Customer, Sale, SaleReturn
+from .models import Customer, CustomerDebtPayment, Sale, SaleReturn
 
 _WALK_IN = frozenset(
     {
@@ -120,12 +120,20 @@ def recalc_customer_debt(customer: Customer) -> Decimal:
         ).aggregate(total=Sum("debt_amount"))["total"]
         or Decimal("0")
     )
+    payments_sum = (
+        CustomerDebtPayment.objects.filter(
+            tenant=customer.tenant,
+            customer=customer,
+        ).aggregate(total=Sum("amount"))["total"]
+        or Decimal("0")
+    )
     balance = max(
         Decimal("0"),
         Decimal(str(sales_sum))
         + Decimal(str(name_sales))
         - Decimal(str(returns_sum))
-        - Decimal(str(name_returns)),
+        - Decimal(str(name_returns))
+        - Decimal(str(payments_sum)),
     )
     if customer.debt != balance:
         customer.debt = balance

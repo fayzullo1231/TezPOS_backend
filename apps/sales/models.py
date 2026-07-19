@@ -20,6 +20,44 @@ class Customer(models.Model):
         return self.name
 
 
+class CustomerDebtPayment(models.Model):
+    """Qarzning bir qismini (yoki to'liq) to'lash."""
+
+    PAYMENT_CASH = "cash"
+    PAYMENT_CARD = "card"
+    PAYMENT_CHOICES = [
+        (PAYMENT_CASH, "Naqd"),
+        (PAYMENT_CARD, "Terminal"),
+    ]
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    tenant = models.ForeignKey(
+        Tenant, on_delete=models.CASCADE, related_name="debt_payments"
+    )
+    customer = models.ForeignKey(
+        Customer, on_delete=models.CASCADE, related_name="debt_payments"
+    )
+    user = models.ForeignKey(
+        User, on_delete=models.SET_NULL, null=True, blank=True, related_name="debt_payments"
+    )
+    amount = models.DecimalField(max_digits=14, decimal_places=2)
+    payment_type = models.CharField(
+        max_length=20, choices=PAYMENT_CHOICES, default=PAYMENT_CASH
+    )
+    note = models.CharField(max_length=255, blank=True)
+    receipt_number = models.PositiveIntegerField(default=0)
+    balance_after = models.DecimalField(max_digits=14, decimal_places=2, default=0)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ["-created_at"]
+        verbose_name = "Qarz to'lovi"
+        verbose_name_plural = "Qarz to'lovlari"
+
+    def __str__(self):
+        return f"#{self.receipt_number} — {self.amount}"
+
+
 class Sale(models.Model):
     """Sotuv / buyurtma."""
 
