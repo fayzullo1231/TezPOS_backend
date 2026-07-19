@@ -6,6 +6,7 @@ from rest_framework import serializers
 
 from apps.catalog.models import Product
 
+from .debt_utils import apply_customer_debt_delta, resolve_customer
 from .models import SaleReturn, SaleReturnItem
 
 
@@ -28,6 +29,9 @@ class SaleReturnItemSerializer(serializers.ModelSerializer):
 
 class SaleReturnSerializer(serializers.ModelSerializer):
     items = SaleReturnItemSerializer(many=True)
+    customer_id = serializers.UUIDField(
+        write_only=True, required=False, allow_null=True
+    )
 
     class Meta:
         model = SaleReturn
@@ -35,6 +39,7 @@ class SaleReturnSerializer(serializers.ModelSerializer):
             "id",
             "client_id",
             "customer",
+            "customer_id",
             "customer_name",
             "status",
             "payment_type",
@@ -60,12 +65,23 @@ class SaleReturnSerializer(serializers.ModelSerializer):
 
     def create(self, validated_data):
         items_data = validated_data.pop("items", [])
+        customer_id = validated_data.pop("customer_id", None)
         request = self.context["request"]
         tenant = request.user.tenant
         user = validated_data.pop("user", None) or request.user
         shift = validated_data.pop("shift", None)
 
         with transaction.atomic():
+            customer = resolve_customer(
+                tenant,
+                customer=validated_data.get("customer"),
+                customer_id=customer_id,
+                customer_name=validated_data.get("customer_name", ""),
+                create_if_missing=False,
+            )
+            if customer:
+                validated_data["customer"] = customer
+
             last = (
                 SaleReturn.objects.filter(tenant=tenant)
                 .order_by("-receipt_number")
@@ -128,6 +144,26 @@ class SaleReturnSerializer(serializers.ModelSerializer):
                 sale_return.completed_at = timezone.now()
                 sale_return.synced_at = timezone.now()
             sale_return.save()
+
+            # Qarzga olingan tovar qaytarilsa — qoldiqdan ayiriladi
+            if (
+                sale_return.status == SaleReturn.STATUS_COMPLETED
+                and sale_return.debt_amount
+                and sale_return.debt_amount > 0
+            ):
+                if not sale_return.customer_id:
+                    customer = resolve_customer(
+                        tenant,
+                        customer_name=sale_return.customer_name,
+                        create_if_missing=False,
+                    )
+                    if customer:
+                        sale_return.customer = customer
+                        sale_return.save(update_fields=["customer"])
+                if sale_return.customer_id:
+                    apply_customer_debt_delta(
+                        sale_return.customer, -sale_return.debt_amount
+                    )
 
         return sale_return
 

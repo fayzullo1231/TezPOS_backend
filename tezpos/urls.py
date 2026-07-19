@@ -13,6 +13,11 @@ urlpatterns = [
         PublicReceiptCheckView.as_view(),
         name="public-receipt-check",
     ),
+    path(
+        "check/<str:server_name>/<int:receipt_number>",
+        PublicReceiptCheckView.as_view(),
+        name="public-receipt-check-noslash",
+    ),
     path("api/auth/", include("apps.accounts.urls")),
     path("api/catalog/", include("apps.catalog.urls")),
     path("api/products/", include("apps.catalog.product_barcode_lookup.urls")),

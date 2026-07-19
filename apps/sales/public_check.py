@@ -2,7 +2,7 @@
 
 from decimal import Decimal
 
-from django.http import Http404, HttpResponse
+from django.http import HttpResponse
 from django.utils.html import escape
 from django.views import View
 
@@ -31,16 +31,45 @@ def _fmt_qty(value) -> str:
     return f"{n.normalize()}"
 
 
+def _html_page(title: str, body: str, status: int = 200) -> HttpResponse:
+    html = f"""<!DOCTYPE html>
+<html lang="uz">
+<head>
+  <meta charset="utf-8"/>
+  <meta name="viewport" content="width=device-width, initial-scale=1"/>
+  <title>{escape(title)}</title>
+</head>
+<body style="margin:0;background:#eef1f6;font-family:system-ui,-apple-system,Segoe UI,Roboto,sans-serif;color:#0f172a">
+  <div style="max-width:480px;margin:40px auto;padding:0 16px">
+    {body}
+  </div>
+</body>
+</html>"""
+    return HttpResponse(html, status=status, content_type="text/html; charset=utf-8")
+
+
 class PublicReceiptCheckView(View):
     """
     GET /check/<server_name>/<receipt_number>/
-    Masalan: http://13.140.146.78:8000/check/xusanuz/4
+    Masalan: https://tez-pos.uz/check/xusanuz/4/
+             http://13.140.146.78:8000/check/xusanuz/4/
     """
 
     def get(self, request, server_name: str, receipt_number: int):
-        tenant = Tenant.objects.filter(server_name__iexact=server_name.strip()).first()
+        slug = (server_name or "").strip()
+        tenant = Tenant.objects.filter(server_name__iexact=slug).first()
         if not tenant:
-            raise Http404("Do'kon topilmadi")
+            return _html_page(
+                "Do'kon topilmadi",
+                f"""
+                <div style="background:#fff;border-radius:16px;padding:28px 22px;text-align:center;box-shadow:0 8px 30px rgba(15,23,42,.08)">
+                  <div style="font-size:18px;font-weight:700;margin-bottom:8px">Do'kon topilmadi</div>
+                  <div style="color:#64748b;font-size:14px">Server: <code>{escape(slug)}</code></div>
+                  <div style="color:#94a3b8;font-size:12px;margin-top:12px">To'g'ri manzil: /check/&lt;server&gt;/&lt;chek_raqami&gt;/</div>
+                </div>
+                """,
+                status=404,
+            )
 
         sale = (
             Sale.objects.filter(
@@ -54,7 +83,16 @@ class PublicReceiptCheckView(View):
             .first()
         )
         if not sale:
-            raise Http404("Chek topilmadi")
+            return _html_page(
+                "Chek topilmadi",
+                f"""
+                <div style="background:#fff;border-radius:16px;padding:28px 22px;text-align:center;box-shadow:0 8px 30px rgba(15,23,42,.08)">
+                  <div style="font-size:18px;font-weight:700;margin-bottom:8px">Chek topilmadi</div>
+                  <div style="color:#64748b;font-size:14px">{escape(tenant.display_name or tenant.server_name)} — № {receipt_number}</div>
+                </div>
+                """,
+                status=404,
+            )
 
         store = escape(tenant.display_name or tenant.server_name)
         cashier = ""
@@ -106,35 +144,22 @@ class PublicReceiptCheckView(View):
             </div>
             """
 
-        html = f"""<!DOCTYPE html>
-<html lang="uz">
-<head>
-  <meta charset="utf-8"/>
-  <meta name="viewport" content="width=device-width, initial-scale=1"/>
-  <title>Chek № {sale.receipt_number} — {store}</title>
-</head>
-<body style="margin:0;background:#eef1f6;font-family:system-ui,-apple-system,Segoe UI,Roboto,sans-serif;color:#0f172a">
-  <div style="max-width:480px;margin:24px auto;padding:0 12px 40px">
+        body = f"""
     <div style="background:#fff;border-radius:16px;box-shadow:0 8px 30px rgba(15,23,42,.08);overflow:hidden">
       <div style="padding:20px 20px 12px;border-bottom:1px solid #eef1f6;text-align:center">
         <div style="font-size:20px;font-weight:800;letter-spacing:-.02em">{store}</div>
-        <div style="margin-top:4px;font-size:13px;color:#64748b">Elektron chek</div>
-        <div style="margin-top:10px;font-size:18px;font-weight:700">№ {sale.receipt_number}</div>
-        <div style="margin-top:4px;font-size:13px;color:#64748b">{when_s}</div>
+        <div style="margin-top:6px;color:#64748b;font-size:13px">Elektron chek № {sale.receipt_number}</div>
       </div>
-      <div style="padding:16px 20px;font-size:14px;line-height:1.5">
-        <div style="display:flex;justify-content:space-between;gap:12px;margin-bottom:6px">
-          <span style="color:#64748b">Mijoz</span><span style="font-weight:600">{customer}</span>
-        </div>
-        <div style="display:flex;justify-content:space-between;gap:12px;margin-bottom:6px">
-          <span style="color:#64748b">To'lov</span><span style="font-weight:600">{escape(pay)}</span>
-        </div>
-        {f'<div style="display:flex;justify-content:space-between;gap:12px;margin-bottom:6px"><span style="color:#64748b">Kassir</span><span>{cashier}</span></div>' if cashier else ''}
+      <div style="padding:16px 20px;font-size:13px;color:#475569;line-height:1.6">
+        <div style="display:flex;justify-content:space-between"><span>Sana</span><strong style="color:#0f172a">{when_s}</strong></div>
+        <div style="display:flex;justify-content:space-between"><span>Kassir</span><strong style="color:#0f172a">{cashier or "—"}</strong></div>
+        <div style="display:flex;justify-content:space-between"><span>Mijoz</span><strong style="color:#0f172a">{customer}</strong></div>
+        <div style="display:flex;justify-content:space-between"><span>To'lov</span><strong style="color:#0f172a">{pay}</strong></div>
       </div>
       <div style="padding:0 12px 8px">
         <table style="width:100%;border-collapse:collapse;font-size:13px">
           <thead>
-            <tr style="color:#64748b;text-align:left">
+            <tr style="color:#94a3b8;text-align:left">
               <th style="padding:8px 4px;font-weight:600">#</th>
               <th style="padding:8px 4px;font-weight:600">Mahsulot</th>
               <th style="padding:8px 4px;font-weight:600;text-align:right">Soni</th>
@@ -143,21 +168,21 @@ class PublicReceiptCheckView(View):
             </tr>
           </thead>
           <tbody>
-            {''.join(rows) if rows else '<tr><td colspan="5" style="padding:16px;text-align:center;color:#94a3b8">Mahsulotlar yoq</td></tr>'}
+            {''.join(rows) if rows else "<tr><td colspan='5' style='padding:12px;color:#94a3b8;text-align:center'>Mahsulot yo'q</td></tr>"}
           </tbody>
         </table>
       </div>
-      <div style="padding:12px 20px 20px;border-top:1px solid #eef1f6">
-        {(f'<div style="display:flex;justify-content:space-between;margin-bottom:6px;font-size:14px"><span style="color:#64748b">Chegirma</span><span>- {_fmt_money(sale.discount_amount)}</span></div>' if (sale.discount_amount or 0) > 0 else '')}
-        <div style="display:flex;justify-content:space-between;align-items:baseline;gap:12px">
-          <span style="font-size:15px;font-weight:700">Jami</span>
-          <span style="font-size:22px;font-weight:800">{_fmt_money(sale.total)}</span>
+      <div style="padding:16px 20px 20px;border-top:1px solid #eef1f6">
+        <div style="display:flex;justify-content:space-between;font-size:15px;margin-bottom:6px">
+          <span style="color:#64748b">Jami</span>
+          <strong>{_fmt_money(sale.total)}</strong>
+        </div>
+        <div style="display:flex;justify-content:space-between;font-size:13px;color:#64748b">
+          <span>To'langan</span><span>{_fmt_money(sale.paid_amount)}</span>
         </div>
         {debt_block}
-        <p style="margin:18px 0 0;text-align:center;font-size:12px;color:#94a3b8">TezPOS</p>
       </div>
     </div>
-  </div>
-</body>
-</html>"""
-        return HttpResponse(html, content_type="text/html; charset=utf-8")
+    <div style="text-align:center;color:#94a3b8;font-size:11px;margin-top:16px">TezPOS</div>
+        """
+        return _html_page(f"Chek № {sale.receipt_number} — {store}", body)
