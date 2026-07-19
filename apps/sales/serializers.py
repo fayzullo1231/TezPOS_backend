@@ -44,7 +44,16 @@ class SaleSerializer(serializers.ModelSerializer):
     customer_id = serializers.UUIDField(
         write_only=True, required=False, allow_null=True
     )
+    customer_debt_before = serializers.DecimalField(
+        max_digits=14,
+        decimal_places=2,
+        write_only=True,
+        required=False,
+        allow_null=True,
+        min_value=Decimal("0"),
+    )
     customer_debt = serializers.SerializerMethodField(read_only=True)
+    customer_debt_balance = serializers.SerializerMethodField(read_only=True)
     customer_phone = serializers.SerializerMethodField(read_only=True)
 
     class Meta:
@@ -54,8 +63,10 @@ class SaleSerializer(serializers.ModelSerializer):
             "client_id",
             "customer",
             "customer_id",
+            "customer_debt_before",
             "customer_name",
             "customer_debt",
+            "customer_debt_balance",
             "customer_phone",
             "status",
             "payment_type",
@@ -78,6 +89,7 @@ class SaleSerializer(serializers.ModelSerializer):
             "created_at",
             "completed_at",
             "customer_debt",
+            "customer_debt_balance",
             "customer_phone",
         ]
 
@@ -85,6 +97,9 @@ class SaleSerializer(serializers.ModelSerializer):
         if obj.customer_id and obj.customer:
             return str(obj.customer.debt)
         return None
+
+    def get_customer_debt_balance(self, obj):
+        return self.get_customer_debt(obj)
 
     def get_customer_phone(self, obj):
         if obj.customer_id and obj.customer:
@@ -94,6 +109,7 @@ class SaleSerializer(serializers.ModelSerializer):
     def create(self, validated_data):
         items_data = validated_data.pop("items", [])
         customer_id = validated_data.pop("customer_id", None)
+        customer_debt_before = validated_data.pop("customer_debt_before", None)
         request = self.context["request"]
         tenant = request.user.tenant
         user = validated_data.pop("user", None) or request.user
@@ -109,6 +125,20 @@ class SaleSerializer(serializers.ModelSerializer):
                 customer_name=customer_name,
                 create_if_missing=False,
             )
+            if (
+                customer is None
+                and validated_data.get("payment_type") == Sale.PAYMENT_CREDIT
+            ):
+                name = (customer_name or "").strip()
+                if not name:
+                    raise serializers.ValidationError(
+                        {"customer_id": "Qarzga sotish uchun mijozni tanlang."}
+                    )
+                customer = resolve_customer(
+                    tenant,
+                    customer_name=name,
+                    create_if_missing=True,
+                )
             if customer:
                 validated_data["customer"] = customer
                 if not (validated_data.get("customer_name") or "").strip():
@@ -189,8 +219,19 @@ class SaleSerializer(serializers.ModelSerializer):
                         sale.customer = customer
                         sale.save(update_fields=["customer"])
                 if sale.customer_id:
-                    apply_customer_debt_delta(sale.customer, sale.debt_amount)
-                    sale.customer.refresh_from_db(fields=["debt", "phone"])
+                    locked = Customer.objects.select_for_update().get(
+                        pk=sale.customer_id
+                    )
+                    saved_debt = locked.debt or Decimal("0")
+                    # Eski desktop versiyalar qarzni faqat localStorage'da saqlagan
+                    if (
+                        customer_debt_before is not None
+                        and Decimal(str(customer_debt_before)) > saved_debt
+                    ):
+                        saved_debt = Decimal(str(customer_debt_before))
+                    locked.debt = saved_debt + sale.debt_amount
+                    locked.save(update_fields=["debt"])
+                    sale.customer = locked
 
         return sale
 
@@ -223,6 +264,13 @@ class SyncSaleSerializer(serializers.Serializer):
     client_id = serializers.CharField(max_length=64)
     customer_name = serializers.CharField(required=False, allow_blank=True, default="")
     customer_id = serializers.UUIDField(required=False, allow_null=True)
+    customer_debt_before = serializers.DecimalField(
+        max_digits=14,
+        decimal_places=2,
+        required=False,
+        allow_null=True,
+        min_value=Decimal("0"),
+    )
     payment_type = serializers.ChoiceField(choices=Sale.PAYMENT_CHOICES, default="cash")
     paid_amount = serializers.DecimalField(
         max_digits=14, decimal_places=2, required=False, allow_null=True
