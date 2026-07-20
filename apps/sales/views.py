@@ -102,6 +102,7 @@ class CustomerViewSet(viewsets.ModelViewSet):
                 "balance": str(balance),
                 "balance_before": str(current),
                 "payment_type": payment.payment_type,
+                "check_path": f"/check/{tenant.server_name}/{payment.id}/",
                 "customer": {
                     "id": str(customer.id),
                     "name": customer.name,

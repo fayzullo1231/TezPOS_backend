@@ -1,6 +1,9 @@
 """Ommaviy elektron chek — autentifikatsiyasiz."""
 
+from __future__ import annotations
+
 from decimal import Decimal
+from uuid import UUID
 
 from django.http import HttpResponse
 from django.utils.html import escape
@@ -8,7 +11,7 @@ from django.views import View
 
 from apps.accounts.models import Tenant
 
-from .models import Sale
+from .models import CustomerDebtPayment, Sale
 
 
 def _fmt_money(value) -> str:
@@ -16,9 +19,9 @@ def _fmt_money(value) -> str:
         n = Decimal(str(value or 0))
     except Exception:
         n = Decimal("0")
-    # 5000.00 → 5 000
-    s = f"{n:,.0f}".replace(",", " ")
-    return f"{s} so'm"
+    sign = "-" if n < 0 else ""
+    s = f"{abs(n):,.0f}".replace(",", " ")
+    return f"{sign}{s} so'm"
 
 
 def _fmt_qty(value) -> str:
@@ -48,52 +51,132 @@ def _html_page(title: str, body: str, status: int = 200) -> HttpResponse:
     return HttpResponse(html, status=status, content_type="text/html; charset=utf-8")
 
 
+def _not_found(title: str, detail: str) -> HttpResponse:
+    return _html_page(
+        title,
+        f"""
+        <div style="background:#fff;border-radius:16px;padding:28px 22px;text-align:center;box-shadow:0 8px 30px rgba(15,23,42,.08)">
+          <div style="font-size:18px;font-weight:700;margin-bottom:8px">{escape(title)}</div>
+          <div style="color:#64748b;font-size:14px">{detail}</div>
+        </div>
+        """,
+        status=404,
+    )
+
+
 class PublicReceiptCheckView(View):
     """
-    GET /check/<server_name>/<receipt_number>/
-    Masalan: https://tez-pos.uz/check/xusanuz/4/
-             http://13.140.146.78:8000/check/xusanuz/4/
+    GET /check/<server_name>/<ref>/
+    ref = sale UUID | payment UUID | receipt_number (int)
+    Masalan: https://tez-pos.uz/check/xusanuz/a1b2c3d4-.../
+             https://tez-pos.uz/check/xusanuz/4/
     """
 
-    def get(self, request, server_name: str, receipt_number: int):
+    def get(self, request, server_name: str, ref: str):
         slug = (server_name or "").strip()
         tenant = Tenant.objects.filter(server_name__iexact=slug).first()
         if not tenant:
-            return _html_page(
+            return _not_found(
                 "Do'kon topilmadi",
-                f"""
-                <div style="background:#fff;border-radius:16px;padding:28px 22px;text-align:center;box-shadow:0 8px 30px rgba(15,23,42,.08)">
-                  <div style="font-size:18px;font-weight:700;margin-bottom:8px">Do'kon topilmadi</div>
-                  <div style="color:#64748b;font-size:14px">Server: <code>{escape(slug)}</code></div>
-                  <div style="color:#94a3b8;font-size:12px;margin-top:12px">To'g'ri manzil: /check/&lt;server&gt;/&lt;chek_raqami&gt;/</div>
-                </div>
-                """,
-                status=404,
+                f"Server: <code>{escape(slug)}</code>",
             )
 
-        sale = (
-            Sale.objects.filter(
-                tenant=tenant,
-                receipt_number=receipt_number,
-                status=Sale.STATUS_COMPLETED,
+        ref = (ref or "").strip().rstrip("/")
+        payment = None
+        sale = None
+
+        try:
+            uid = UUID(str(ref))
+        except Exception:
+            uid = None
+
+        if uid is not None:
+            sale = (
+                Sale.objects.filter(
+                    tenant=tenant,
+                    id=uid,
+                    status=Sale.STATUS_COMPLETED,
+                )
+                .select_related("user", "customer")
+                .prefetch_related("items")
+                .first()
             )
-            .select_related("user", "customer")
-            .prefetch_related("items")
-            .order_by("-completed_at", "-created_at")
-            .first()
+            if not sale:
+                payment = (
+                    CustomerDebtPayment.objects.filter(tenant=tenant, id=uid)
+                    .select_related("customer", "user")
+                    .first()
+                )
+        elif ref.isdigit():
+            num = int(ref)
+            sale = (
+                Sale.objects.filter(
+                    tenant=tenant,
+                    receipt_number=num,
+                    status=Sale.STATUS_COMPLETED,
+                )
+                .select_related("user", "customer")
+                .prefetch_related("items")
+                .order_by("-completed_at", "-created_at")
+                .first()
+            )
+            if not sale:
+                payment = (
+                    CustomerDebtPayment.objects.filter(
+                        tenant=tenant, receipt_number=num
+                    )
+                    .select_related("customer", "user")
+                    .order_by("-created_at")
+                    .first()
+                )
+
+        if payment:
+            return self._render_payment(tenant, payment)
+        if sale:
+            return self._render_sale(tenant, sale)
+        return _not_found(
+            "Chek topilmadi",
+            f"{escape(tenant.display_name or tenant.server_name)} — <code>{escape(ref)}</code>",
         )
-        if not sale:
-            return _html_page(
-                "Chek topilmadi",
-                f"""
-                <div style="background:#fff;border-radius:16px;padding:28px 22px;text-align:center;box-shadow:0 8px 30px rgba(15,23,42,.08)">
-                  <div style="font-size:18px;font-weight:700;margin-bottom:8px">Chek topilmadi</div>
-                  <div style="color:#64748b;font-size:14px">{escape(tenant.display_name or tenant.server_name)} — № {receipt_number}</div>
-                </div>
-                """,
-                status=404,
-            )
 
+    def _render_payment(self, tenant, payment: CustomerDebtPayment) -> HttpResponse:
+        store = escape(tenant.display_name or tenant.server_name)
+        customer = escape(payment.customer.name if payment.customer_id else "—")
+        when = payment.created_at
+        when_s = when.strftime("%d.%m.%Y %H:%M") if when else "—"
+        paid = payment.amount or Decimal("0")
+        balance = payment.balance_after
+        if balance is None and payment.customer_id:
+            balance = payment.customer.debt
+        body = f"""
+    <div style="background:#fff;border-radius:16px;box-shadow:0 8px 30px rgba(15,23,42,.08);overflow:hidden">
+      <div style="padding:20px 20px 12px;border-bottom:1px solid #eef1f6;text-align:center">
+        <div style="font-size:20px;font-weight:800">{store}</div>
+        <div style="margin-top:6px;color:#64748b;font-size:13px">Qarz to'lovi № {payment.receipt_number}</div>
+      </div>
+      <div style="padding:16px 20px;font-size:13px;color:#475569;line-height:1.6">
+        <div style="display:flex;justify-content:space-between"><span>Sana</span><strong style="color:#0f172a">{when_s}</strong></div>
+        <div style="display:flex;justify-content:space-between"><span>Mijoz</span><strong style="color:#0f172a">{customer}</strong></div>
+        <div style="display:flex;justify-content:space-between"><span>Turi</span><strong style="color:#0f172a">Qarz to'lovi</strong></div>
+      </div>
+      <div style="padding:16px 20px 20px;border-top:1px solid #eef1f6">
+        <div style="margin-top:4px;padding:12px;border-radius:12px;background:#ecfdf5;border:1px solid #a7f3d0">
+          <div style="display:flex;justify-content:space-between;margin-bottom:6px">
+            <span style="color:#065f46">Qarz</span>
+            <strong style="color:#047857">{_fmt_money(-paid)}</strong>
+          </div>
+          <div style="display:flex;justify-content:space-between">
+            <span style="color:#065f46">Qoldiq</span>
+            <strong style="color:#047857">{_fmt_money(balance)}</strong>
+          </div>
+        </div>
+      </div>
+    </div>
+    <div style="text-align:center;color:#94a3b8;font-size:11px;margin-top:16px">TezPOS</div>
+        """
+        return _html_page(f"To'lov № {payment.receipt_number} — {store}", body)
+
+    def _render_sale(self, tenant, sale: Sale) -> HttpResponse:
         store = escape(tenant.display_name or tenant.server_name)
         cashier = ""
         if sale.user_id:

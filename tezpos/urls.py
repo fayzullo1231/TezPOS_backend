@@ -9,12 +9,12 @@ from apps.sales.public_check import PublicReceiptCheckView
 urlpatterns = [
     path("admin/", admin.site.urls),
     path(
-        "check/<str:server_name>/<int:receipt_number>/",
+        "check/<str:server_name>/<str:ref>/",
         PublicReceiptCheckView.as_view(),
         name="public-receipt-check",
     ),
     path(
-        "check/<str:server_name>/<int:receipt_number>",
+        "check/<str:server_name>/<str:ref>",
         PublicReceiptCheckView.as_view(),
         name="public-receipt-check-noslash",
     ),
