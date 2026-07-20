@@ -123,9 +123,10 @@ class SaleItem(models.Model):
     unit_price = models.DecimalField(max_digits=14, decimal_places=2)
     discount = models.DecimalField(max_digits=14, decimal_places=2, default=0)
     total = models.DecimalField(max_digits=14, decimal_places=2)
+    sort_order = models.PositiveIntegerField(default=0)
 
     class Meta:
-        ordering = ["id"]
+        ordering = ["sort_order", "id"]
 
 
 class SaleReturn(models.Model):
@@ -197,8 +198,9 @@ class SaleReturnItem(models.Model):
     unit_price = models.DecimalField(max_digits=14, decimal_places=2)
     discount = models.DecimalField(max_digits=14, decimal_places=2, default=0)
     total = models.DecimalField(max_digits=14, decimal_places=2)
+    sort_order = models.PositiveIntegerField(default=0)
 
     class Meta:
-        ordering = ["id"]
+        ordering = ["sort_order", "id"]
         verbose_name = "Qaytarish mahsuloti"
         verbose_name_plural = "Qaytarish mahsulotlari"

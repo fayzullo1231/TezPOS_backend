@@ -12,6 +12,7 @@ from .models import SaleReturn, SaleReturnItem
 
 class SaleReturnItemSerializer(serializers.ModelSerializer):
     product_id = serializers.UUIDField(write_only=True, required=False)
+    sort_order = serializers.IntegerField(required=False, default=0)
 
     class Meta:
         model = SaleReturnItem
@@ -23,6 +24,7 @@ class SaleReturnItemSerializer(serializers.ModelSerializer):
             "unit_price",
             "discount",
             "total",
+            "sort_order",
         ]
         read_only_fields = ["id", "product_name", "total"]
 
@@ -99,7 +101,7 @@ class SaleReturnSerializer(serializers.ModelSerializer):
             )
 
             subtotal = Decimal("0")
-            for item_data in items_data:
+            for idx, item_data in enumerate(items_data):
                 product = Product.objects.select_for_update().get(
                     id=item_data["product_id"], tenant=tenant
                 )
@@ -107,6 +109,9 @@ class SaleReturnSerializer(serializers.ModelSerializer):
                 unit_price = Decimal(str(item_data.get("unit_price", product.price)))
                 discount = Decimal(str(item_data.get("discount", 0)))
                 line_total = qty * unit_price - discount
+                sort_order = item_data.get("sort_order")
+                if sort_order is None:
+                    sort_order = idx
 
                 SaleReturnItem.objects.create(
                     sale_return=sale_return,
@@ -116,6 +121,7 @@ class SaleReturnSerializer(serializers.ModelSerializer):
                     unit_price=unit_price,
                     discount=discount,
                     total=line_total,
+                    sort_order=int(sort_order),
                 )
                 subtotal += line_total
 

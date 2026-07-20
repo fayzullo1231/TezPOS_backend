@@ -6,7 +6,7 @@ from rest_framework import serializers
 
 from apps.catalog.models import Product
 
-from .debt_utils import apply_customer_debt_delta, resolve_customer
+from .debt_utils import resolve_customer
 from .models import Customer, Sale, SaleItem
 
 
@@ -24,6 +24,7 @@ class CustomerSerializer(serializers.ModelSerializer):
 
 class SaleItemSerializer(serializers.ModelSerializer):
     product_id = serializers.UUIDField(write_only=True, required=False)
+    sort_order = serializers.IntegerField(required=False, default=0)
 
     class Meta:
         model = SaleItem
@@ -35,6 +36,7 @@ class SaleItemSerializer(serializers.ModelSerializer):
             "unit_price",
             "discount",
             "total",
+            "sort_order",
         ]
         read_only_fields = ["id", "product_name", "total"]
 
@@ -161,7 +163,7 @@ class SaleSerializer(serializers.ModelSerializer):
             )
 
             subtotal = Decimal("0")
-            for item_data in items_data:
+            for idx, item_data in enumerate(items_data):
                 product = Product.objects.select_for_update().get(
                     id=item_data["product_id"], tenant=tenant
                 )
@@ -169,6 +171,9 @@ class SaleSerializer(serializers.ModelSerializer):
                 unit_price = Decimal(str(item_data.get("unit_price", product.price)))
                 discount = Decimal(str(item_data.get("discount", 0)))
                 line_total = qty * unit_price - discount
+                sort_order = item_data.get("sort_order")
+                if sort_order is None:
+                    sort_order = idx
 
                 SaleItem.objects.create(
                     sale=sale,
@@ -178,6 +183,7 @@ class SaleSerializer(serializers.ModelSerializer):
                     unit_price=unit_price,
                     discount=discount,
                     total=line_total,
+                    sort_order=int(sort_order),
                 )
                 subtotal += line_total
 
