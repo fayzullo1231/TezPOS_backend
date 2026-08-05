@@ -254,9 +254,21 @@ class ShiftHistoryView(APIView):
 
     def get(self, request):
         tenant = request.user.tenant
-        qs = Shift.objects.filter(
-            tenant=tenant, user=request.user
-        ).select_related("user")
+        user = request.user
+
+        # Bir foydalanuvchida faqat 1 ta ochiq smena — eski orphanlarni yopamiz
+        open_shifts = list(
+            Shift.objects.filter(
+                tenant=tenant, user=user, status=Shift.STATUS_OPEN
+            ).order_by("-opened_at")
+        )
+        for orphan in open_shifts[1:]:
+            orphan.status = Shift.STATUS_CLOSED
+            if not orphan.closed_at:
+                orphan.closed_at = timezone.now()
+            orphan.save(update_fields=["status", "closed_at"])
+
+        qs = Shift.objects.filter(tenant=tenant, user=user).select_related("user")
 
         date_from = request.query_params.get("date_from")
         date_to = request.query_params.get("date_to")
