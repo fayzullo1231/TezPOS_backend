@@ -250,11 +250,13 @@ def _shift_user_name(user: User) -> str:
 
 
 class ShiftHistoryView(APIView):
-    """Tenantdagi barcha smenalar — har bir ochish/yopish alohida qator."""
+    """Joriy foydalanuvchining smenalari — har bir ochish/yopish alohida qator."""
 
     def get(self, request):
         tenant = request.user.tenant
-        qs = Shift.objects.filter(tenant=tenant).select_related("user")
+        qs = Shift.objects.filter(
+            tenant=tenant, user=request.user
+        ).select_related("user")
 
         date_from = request.query_params.get("date_from")
         date_to = request.query_params.get("date_to")
