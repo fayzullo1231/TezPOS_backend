@@ -6,12 +6,19 @@ from decimal import Decimal
 from uuid import UUID
 
 from django.http import HttpResponse
+from django.db.models import Prefetch
 from django.utils.html import escape
 from django.views import View
 
 from apps.accounts.models import Tenant
 
-from .models import CustomerDebtPayment, Sale
+from .models import CustomerDebtPayment, Sale, SaleItem
+
+
+_ITEMS_PREFETCH = Prefetch(
+    "items",
+    queryset=SaleItem.objects.order_by("sort_order", "id"),
+)
 
 
 def _fmt_money(value) -> str:
@@ -98,7 +105,7 @@ class PublicReceiptCheckView(View):
                     status=Sale.STATUS_COMPLETED,
                 )
                 .select_related("user", "customer")
-                .prefetch_related("items")
+                .prefetch_related(_ITEMS_PREFETCH)
                 .first()
             )
             if not sale:
@@ -116,7 +123,7 @@ class PublicReceiptCheckView(View):
                     status=Sale.STATUS_COMPLETED,
                 )
                 .select_related("user", "customer")
-                .prefetch_related("items")
+                .prefetch_related(_ITEMS_PREFETCH)
                 .order_by("-completed_at", "-created_at")
                 .first()
             )

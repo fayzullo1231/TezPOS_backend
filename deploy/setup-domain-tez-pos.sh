@@ -124,7 +124,15 @@ rm -f /etc/nginx/sites-enabled/default
 echo "==> nginx -t"
 nginx -t
 systemctl enable nginx
-systemctl reload nginx
+systemctl reload nginx || systemctl restart nginx
+
+# Contabo / ufw — 80 va 443 ochiq bo'lishi shart
+if command -v ufw >/dev/null 2>&1; then
+  echo "==> ufw: 80, 443, 8000..."
+  ufw allow 80/tcp || true
+  ufw allow 443/tcp || true
+  ufw allow 8000/tcp || true
+fi
 
 # ---------- HTTPS (ixtiyoriy) ----------
 if command -v certbot >/dev/null 2>&1; then
@@ -144,7 +152,7 @@ else
 fi
 
 systemctl restart tezpos-backend
-systemctl reload nginx
+systemctl reload nginx || systemctl restart nginx
 
 echo ""
 echo "========== HOLAT =========="
@@ -154,12 +162,12 @@ ss -tulpn | grep -E ':80|:443|:8000' || true
 echo ""
 echo "Tekshiruv:"
 curl -sI "http://127.0.0.1:${BACKEND_PORT}/admin/login/" | head -n 2 || true
-curl -sI "http://${DOMAIN}/admin/login/" | head -n 3 || true
+curl -sI "http://127.0.0.1/check/xusanuz/1/" -H "Host: ${DOMAIN}" | head -n 3 || true
 curl -sI "http://${DOMAIN}/check/xusanuz/1/" | head -n 3 || true
 echo ""
 echo "Tayyor!"
-echo "  http://${DOMAIN}/"
-echo "  https://${DOMAIN}/   (agar certbot o'tgan bo'lsa)"
-echo "  API (POS): http://${SERVER_IP}:8000  yoki  https://${DOMAIN}"
+echo "  http://${DOMAIN}/check/<server>/<id>/"
+echo "  https://${DOMAIN}/check/<server>/<id>/   (agar certbot o'tgan bo'lsa)"
+echo "  Zaxira API: http://${SERVER_IP}:8000/check/<server>/<id>/"
 echo ""
-echo "Agar domen ochilmasa Contabo firewall da 80 va 443 ochiqligini tekshiring."
+echo "Agar tashqaridan domen ochilmasa Contabo Panel → Firewall da 80 va 443 Incoming Allow qiling."

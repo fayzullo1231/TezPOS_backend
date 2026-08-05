@@ -12,23 +12,37 @@ if [[ "${EUID:-$(id -u)}" -ne 0 ]]; then
     exit 1
 fi
 
+GITHUB_REPO="${GITHUB_REPO:-https://github.com/fayzullo1231/TezPOS_backend.git}"
+
 echo "==> Tizim paketlari o'rnatilmoqda..."
 apt-get update -qq
-apt-get install -y -qq python3 python3-venv python3-pip rsync
+apt-get install -y -qq python3 python3-venv python3-pip rsync git curl
 
 echo "==> Foydalanuvchi: $SERVICE_USER"
 if ! id "$SERVICE_USER" &>/dev/null; then
     useradd --system --home-dir "$INSTALL_DIR" --shell /usr/sbin/nologin "$SERVICE_USER"
 fi
 
-echo "==> Loyiha nusxalanmoqda: $REPO_ROOT -> $INSTALL_DIR"
 mkdir -p "$INSTALL_DIR"
-rsync -a --delete \
-    --exclude 'venv' \
-    --exclude '__pycache__' \
-    --exclude '.git' \
-    --exclude 'data/*.db-journal' \
-    "$REPO_ROOT/" "$INSTALL_DIR/"
+
+if [[ ! -f "$INSTALL_DIR/manage.py" ]]; then
+    echo "==> GitHub dan klonlanmoqda: $GITHUB_REPO -> $INSTALL_DIR"
+    if [[ -d "$INSTALL_DIR/.git" ]] || [[ -n "$(ls -A "$INSTALL_DIR" 2>/dev/null || true)" ]]; then
+        echo "Xato: $INSTALL_DIR bo'sh emas. Boshqa papka tanlang yoki tozalang."
+        exit 1
+    fi
+    git clone --branch main "$GITHUB_REPO" "$INSTALL_DIR"
+elif [[ "$REPO_ROOT" != "$(realpath "$INSTALL_DIR")" ]]; then
+    echo "==> Loyiha nusxalanmoqda: $REPO_ROOT -> $INSTALL_DIR"
+    rsync -a --delete \
+        --exclude 'venv' \
+        --exclude '__pycache__' \
+        --exclude '.git' \
+        --exclude 'data/*.db-journal' \
+        "$REPO_ROOT/" "$INSTALL_DIR/"
+else
+    echo "==> Loyiha allaqachon $INSTALL_DIR da (git clone)"
+fi
 
 mkdir -p "$INSTALL_DIR/data" "$INSTALL_DIR/media" "$INSTALL_DIR/staticfiles"
 chown -R "$SERVICE_USER:$SERVICE_USER" "$INSTALL_DIR"
@@ -50,7 +64,7 @@ SECRET_KEY="$("$INSTALL_DIR/venv/bin/python" -c 'import secrets; print(secrets.t
 # Mavjud qiymatlarni saqlab, kerakli maydonlarni yangilash
 grep -q '^DJANGO_SECRET_KEY=' "$ENV_FILE" && sed -i "s|^DJANGO_SECRET_KEY=.*|DJANGO_SECRET_KEY=$SECRET_KEY|" "$ENV_FILE" || echo "DJANGO_SECRET_KEY=$SECRET_KEY" >> "$ENV_FILE"
 grep -q '^DEBUG=' "$ENV_FILE" && sed -i 's|^DEBUG=.*|DEBUG=false|' "$ENV_FILE" || echo "DEBUG=false" >> "$ENV_FILE"
-grep -q '^USE_SQLITE=' "$ENV_FILE" && sed -i 's|^USE_SQLITE=.*|USE_SQLITE=true|' "$ENV_FILE" || echo "USE_SQLITE=true" >> "$ENV_FILE"
+grep -q '^DB_ENGINE=' "$ENV_FILE" && sed -i 's|^DB_ENGINE=.*|DB_ENGINE=sqlite|' "$ENV_FILE" || echo "DB_ENGINE=sqlite" >> "$ENV_FILE"
 
 if [[ -n "$SERVER_IP" ]]; then
     if grep -q '^ALLOWED_HOSTS=' "$ENV_FILE"; then
@@ -61,14 +75,25 @@ if [[ -n "$SERVER_IP" ]]; then
     else
         echo "ALLOWED_HOSTS=localhost,127.0.0.1,$SERVER_IP" >> "$ENV_FILE"
     fi
+
+    CSRF_ORIGINS="http://localhost,http://127.0.0.1,http://${SERVER_IP}:8000"
+    if grep -q '^CSRF_TRUSTED_ORIGINS=' "$ENV_FILE"; then
+        CURRENT_CSRF="$(grep '^CSRF_TRUSTED_ORIGINS=' "$ENV_FILE" | cut -d= -f2-)"
+        if [[ "$CURRENT_CSRF" != *"$SERVER_IP"* ]]; then
+            sed -i "s|^CSRF_TRUSTED_ORIGINS=.*|CSRF_TRUSTED_ORIGINS=${CSRF_ORIGINS}|" "$ENV_FILE"
+        fi
+    else
+        echo "CSRF_TRUSTED_ORIGINS=${CSRF_ORIGINS}" >> "$ENV_FILE"
+    fi
 fi
 
 chown "$SERVICE_USER:$SERVICE_USER" "$ENV_FILE"
 
 echo "==> Migratsiya va demo ma'lumotlar..."
 sudo -u "$SERVICE_USER" bash -c "cd '$INSTALL_DIR' && ./venv/bin/python manage.py migrate --noinput"
-sudo -u "$SERVICE_USER" bash -c "cd '$INSTALL_DIR' && ./venv/bin/python manage.py collectstatic --noinput" 2>/dev/null || true
+sudo -u "$SERVICE_USER" bash -c "cd '$INSTALL_DIR' && ./venv/bin/python manage.py collectstatic --noinput --clear"
 sudo -u "$SERVICE_USER" bash -c "cd '$INSTALL_DIR' && ./venv/bin/python manage.py seed_demo" 2>/dev/null || true
+sudo -u "$SERVICE_USER" bash -c "cd '$INSTALL_DIR' && ./venv/bin/python manage.py ensure_django_admin" 2>/dev/null || true
 
 echo "==> systemd xizmati o'rnatilmoqda..."
 cp "$SCRIPT_DIR/tezpos-backend.service" /etc/systemd/system/tezpos-backend.service

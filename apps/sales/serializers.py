@@ -1,6 +1,7 @@
 from decimal import Decimal
 
 from django.db import transaction
+from django.db.models import F
 from django.utils import timezone
 from rest_framework import serializers
 
@@ -23,7 +24,7 @@ class CustomerSerializer(serializers.ModelSerializer):
 
 
 class SaleItemSerializer(serializers.ModelSerializer):
-    product_id = serializers.UUIDField(write_only=True, required=False)
+    product_id = serializers.UUIDField(required=False)
     sort_order = serializers.IntegerField(required=False, default=0)
 
     class Meta:
@@ -39,6 +40,14 @@ class SaleItemSerializer(serializers.ModelSerializer):
             "sort_order",
         ]
         read_only_fields = ["id", "product_name", "total"]
+
+    def to_representation(self, instance):
+        data = super().to_representation(instance)
+        # Client savatga qaytarish / chek tartibi uchun
+        pid = getattr(instance, "product_id", None)
+        data["product_id"] = str(pid) if pid else None
+        data["sort_order"] = int(getattr(instance, "sort_order", 0) or 0)
+        return data
 
 
 class SaleSerializer(serializers.ModelSerializer):
@@ -188,7 +197,8 @@ class SaleSerializer(serializers.ModelSerializer):
                 subtotal += line_total
 
                 if sale.status == Sale.STATUS_COMPLETED:
-                    product.quantity = product.quantity - qty
+                    # Atomik kamaytirish — parallel sotuvlarda qoldiq yo'qolmasin
+                    product.quantity = F("quantity") - qty
                     product.save(update_fields=["quantity", "updated_at"])
 
             sale.subtotal = subtotal

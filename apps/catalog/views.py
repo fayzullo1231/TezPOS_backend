@@ -97,6 +97,7 @@ class ProductViewSet(TenantMixin, viewsets.ModelViewSet):
             "price": "0.00",
             "cost_price": "0.00",
             "quantity": "0.000",
+            "min_stock": "0.000",
             "unit": "dona",
             "unit_ref": None,
             "unit_is_weighable": False,

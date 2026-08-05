@@ -166,7 +166,6 @@ class ShiftPreviewView(APIView):
 
     def get(self, request):
         tenant = request.user.tenant
-        today = timezone.localdate()
 
         my_shift = Shift.objects.filter(
             tenant=tenant, user=request.user, status=Shift.STATUS_OPEN
@@ -185,13 +184,6 @@ class ShiftPreviewView(APIView):
                 status=Sale.STATUS_COMPLETED,
                 shift__in=other_open_shifts,
             ).aggregate(s=Sum("total"))
-            other_sales_total = agg["s"] or Decimal("0")
-        else:
-            agg = Sale.objects.filter(
-                tenant=tenant,
-                status=Sale.STATUS_COMPLETED,
-                completed_at__date=today,
-            ).exclude(user=request.user).aggregate(s=Sum("total"))
             other_sales_total = agg["s"] or Decimal("0")
 
         cash_balance, terminal_balance = suggested_opening_balances(tenant)
@@ -248,6 +240,56 @@ class ShiftCurrentView(APIView):
             {
                 "shift": ShiftSerializer(shift).data,
                 "summary": compute_shift_summary(shift),
+            }
+        )
+
+
+def _shift_user_name(user: User) -> str:
+    name = (user.first_name or "").strip()
+    return name or user.username
+
+
+class ShiftHistoryView(APIView):
+    """Tenantdagi barcha smenalar — har bir ochish/yopish alohida qator."""
+
+    def get(self, request):
+        tenant = request.user.tenant
+        qs = Shift.objects.filter(tenant=tenant).select_related("user")
+
+        date_from = request.query_params.get("date_from")
+        date_to = request.query_params.get("date_to")
+        if date_from:
+            qs = qs.filter(opened_at__date__gte=date_from)
+        if date_to:
+            qs = qs.filter(opened_at__date__lte=date_to)
+
+        shifts = list(qs.order_by("-opened_at")[:200])
+        open_count = sum(1 for s in shifts if s.status == Shift.STATUS_OPEN)
+        closed_count = sum(1 for s in shifts if s.status == Shift.STATUS_CLOSED)
+
+        results = []
+        for shift in shifts:
+            summary = compute_shift_summary(shift)
+            results.append(
+                {
+                    "id": str(shift.id),
+                    "opened_at": shift.opened_at,
+                    "closed_at": shift.closed_at,
+                    "status": shift.status,
+                    "opening_cash": str(shift.opening_cash),
+                    "opening_terminal": str(shift.opening_terminal),
+                    "user_id": str(shift.user_id),
+                    "user_name": _shift_user_name(shift.user),
+                    "summary": summary,
+                }
+            )
+
+        return Response(
+            {
+                "count": len(results),
+                "open_count": open_count,
+                "closed_count": closed_count,
+                "results": results,
             }
         )
 

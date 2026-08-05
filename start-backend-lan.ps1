@@ -33,14 +33,16 @@ if (-not (Test-Path ".env")) {
 New-Item -ItemType Directory -Force -Path "data" | Out-Null
 New-Item -ItemType Directory -Force -Path "media" | Out-Null
 
+$env:DB_ENGINE = "sqlite"
+$env:DEBUG = "true"
+
 $lanIp = Get-LanIPv4
 if (-not $lanIp) {
     Write-Warning "Wi-Fi IP topilmadi. runserver 0.0.0.0 da ishga tushadi."
     $lanIp = "SIZNING-IP"
 }
 
-$env:USE_SQLITE = "true"
-$env:DEBUG = "true"
+
 $env:ALLOWED_HOSTS = "localhost,127.0.0.1,$lanIp,*"
 $env:CSRF_TRUSTED_ORIGINS = "http://localhost,http://127.0.0.1,http://${lanIp}:8000"
 

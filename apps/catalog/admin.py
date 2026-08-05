@@ -198,7 +198,7 @@ class ProductImageInline(admin.TabularInline):
 
 @admin.register(Product)
 class ProductAdmin(admin.ModelAdmin):
-    list_display = ["name", "barcode", "barcode_count", "price", "quantity", "tenant", "is_active"]
+    list_display = ["name", "barcode", "barcode_count", "price", "quantity", "min_stock", "tenant", "is_active"]
     search_fields = ["name", "barcode", "barcodes__code"]
     inlines = [ProductBarcodeInline, ProductImageInline]
 
@@ -215,6 +215,7 @@ class ProductAdmin(admin.ModelAdmin):
             "sku",
             "cost_price",
             "quantity",
+            "min_stock",
             "unit",
             "unit_ref",
             "category",

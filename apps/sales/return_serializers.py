@@ -1,6 +1,7 @@
 from decimal import Decimal
 
 from django.db import transaction
+from django.db.models import F
 from django.utils import timezone
 from rest_framework import serializers
 
@@ -11,7 +12,7 @@ from .models import SaleReturn, SaleReturnItem
 
 
 class SaleReturnItemSerializer(serializers.ModelSerializer):
-    product_id = serializers.UUIDField(write_only=True, required=False)
+    product_id = serializers.UUIDField(required=False)
     sort_order = serializers.IntegerField(required=False, default=0)
 
     class Meta:
@@ -27,6 +28,12 @@ class SaleReturnItemSerializer(serializers.ModelSerializer):
             "sort_order",
         ]
         read_only_fields = ["id", "product_name", "total"]
+
+    def to_representation(self, instance):
+        data = super().to_representation(instance)
+        pid = getattr(instance, "product_id", None)
+        data["product_id"] = str(pid) if pid else None
+        return data
 
 
 class SaleReturnSerializer(serializers.ModelSerializer):
@@ -126,7 +133,7 @@ class SaleReturnSerializer(serializers.ModelSerializer):
                 subtotal += line_total
 
                 if sale_return.status == SaleReturn.STATUS_COMPLETED:
-                    product.quantity = product.quantity + qty
+                    product.quantity = F("quantity") + qty
                     product.save(update_fields=["quantity", "updated_at"])
 
             sale_return.subtotal = subtotal

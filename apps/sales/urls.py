@@ -7,6 +7,7 @@ from .views import (
     SaleReturnViewSet,
     SaleViewSet,
     SyncSalesView,
+    TopProductsView,
 )
 
 router = DefaultRouter()
@@ -17,5 +18,6 @@ router.register("", SaleViewSet, basename="sale")
 urlpatterns = [
     path("sync/", SyncSalesView.as_view()),
     path("stats/daily/", DailyStatsView.as_view()),
+    path("stats/top-products/", TopProductsView.as_view()),
     path("", include(router.urls)),
 ]

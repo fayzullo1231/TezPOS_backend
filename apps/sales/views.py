@@ -1,7 +1,7 @@
 from datetime import timedelta
 from decimal import Decimal
 
-from django.db.models import Count, Q, Sum
+from django.db.models import Count, Prefetch, Q, Sum
 from django.db import transaction
 from django.utils import timezone
 from django.utils.dateparse import parse_date
@@ -11,7 +11,7 @@ from rest_framework.response import Response
 from rest_framework.views import APIView
 
 from .debt_utils import apply_customer_debt_delta
-from .models import Customer, CustomerDebtPayment, Sale, SaleItem, SaleReturn
+from .models import Customer, CustomerDebtPayment, Sale, SaleItem, SaleReturn, SaleReturnItem
 from .return_serializers import (
     SaleReturnListSerializer,
     SaleReturnSerializer,
@@ -118,7 +118,12 @@ class SaleViewSet(viewsets.ModelViewSet):
     def get_queryset(self):
         qs = (
             Sale.objects.filter(tenant=self.request.user.tenant)
-            .prefetch_related("items")
+            .prefetch_related(
+                Prefetch(
+                    "items",
+                    queryset=SaleItem.objects.order_by("sort_order", "id"),
+                )
+            )
             .select_related("customer", "user")
         )
         params = self.request.query_params
@@ -135,11 +140,17 @@ class SaleViewSet(viewsets.ModelViewSet):
         if date_from:
             d = parse_date(date_from)
             if d:
-                qs = qs.filter(completed_at__date__gte=d)
+                qs = qs.filter(
+                    Q(completed_at__date__gte=d)
+                    | Q(completed_at__isnull=True, created_at__date__gte=d)
+                )
         if date_to:
             d = parse_date(date_to)
             if d:
-                qs = qs.filter(completed_at__date__lte=d)
+                qs = qs.filter(
+                    Q(completed_at__date__lte=d)
+                    | Q(completed_at__isnull=True, created_at__date__lte=d)
+                )
         if synced == "true":
             qs = qs.exclude(synced_at__isnull=True)
         elif synced == "false":
@@ -166,6 +177,11 @@ class SaleViewSet(viewsets.ModelViewSet):
         )
         serializer.save(user=self.request.user, shift=shift)
 
+    def perform_destroy(self, instance):
+        from .stock import destroy_sale_with_stock
+
+        destroy_sale_with_stock(instance)
+
     @action(detail=True, methods=["post"], url_path="print-receipt")
     def print_receipt(self, request, pk=None):
         sale = self.get_object()
@@ -176,7 +192,12 @@ class SaleReturnViewSet(viewsets.ModelViewSet):
     def get_queryset(self):
         qs = (
             SaleReturn.objects.filter(tenant=self.request.user.tenant)
-            .prefetch_related("items")
+            .prefetch_related(
+                Prefetch(
+                    "items",
+                    queryset=SaleReturnItem.objects.order_by("sort_order", "id"),
+                )
+            )
             .select_related("customer", "user")
         )
         params = self.request.query_params
@@ -223,6 +244,11 @@ class SaleReturnViewSet(viewsets.ModelViewSet):
             self.request.user.shifts.filter(status="open").order_by("-opened_at").first()
         )
         serializer.save(user=self.request.user, shift=shift)
+
+    def perform_destroy(self, instance):
+        from .stock import destroy_return_with_stock
+
+        destroy_return_with_stock(instance)
 
 
 class SyncSalesView(APIView):

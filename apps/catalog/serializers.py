@@ -154,6 +154,7 @@ class ProductSerializer(serializers.ModelSerializer):
             "price",
             "cost_price",
             "quantity",
+            "min_stock",
             "unit",
             "unit_ref",
             "unit_is_weighable",
@@ -170,7 +171,14 @@ class ProductSerializer(serializers.ModelSerializer):
             "created_at",
             "updated_at",
         ]
-        read_only_fields = ["id", "created_at", "updated_at", "image_url", "images", "unit_is_weighable"]
+        read_only_fields = [
+            "id",
+            "created_at",
+            "updated_at",
+            "image_url",
+            "images",
+            "unit_is_weighable",
+        ]
 
     def get_image_url(self, obj):
         request = self.context.get("request")
@@ -444,6 +452,7 @@ class ProductListSerializer(serializers.ModelSerializer):
             "price",
             "cost_price",
             "quantity",
+            "min_stock",
             "unit",
             "unit_ref",
             "unit_is_weighable",

@@ -26,17 +26,17 @@ class Command(BaseCommand):
             admin.is_active = True
             admin.role = "super_admin"
             admin.is_staff = True
+            admin.is_superuser = True
             admin.set_password("admin123")
             admin.save()
             self.stdout.write("kuloloptom: admin / admin123 (yangilandi)")
         else:
-            User.objects.create_user(
+            User.objects.create_superuser(
                 username="admin",
                 password="admin123",
                 first_name="Admin",
                 tenant=kulol_tenant,
                 role="super_admin",
-                is_staff=True,
             )
             self.stdout.write(self.style.SUCCESS("kuloloptom: admin / admin123 (yangi)"))
 
@@ -47,17 +47,17 @@ class Command(BaseCommand):
             demo_user.is_active = True
             demo_user.role = "super_admin"
             demo_user.is_staff = True
+            demo_user.is_superuser = True
             demo_user.set_password("demo123")
             demo_user.save()
             self.stdout.write("demo: demo / demo123 (yangilandi)")
         else:
-            User.objects.create_user(
+            User.objects.create_superuser(
                 username="demo",
                 password="demo123",
                 first_name="Demo",
                 tenant=demo_tenant,
                 role="super_admin",
-                is_staff=True,
             )
             self.stdout.write(self.style.SUCCESS("demo: demo / demo123 (yangi)"))
 

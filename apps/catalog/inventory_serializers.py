@@ -1,6 +1,7 @@
 from decimal import Decimal
 
 from django.db import transaction
+from django.db.models import F
 from django.utils import timezone
 from rest_framework import serializers
 
@@ -135,7 +136,7 @@ class StockReceiptCreateSerializer(serializers.Serializer):
                     line_total=line_total,
                 )
 
-                product.quantity = (product.quantity or Decimal("0")) + qty
+                product.quantity = F("quantity") + qty
                 product.cost_price = cost
                 if include_selling and sale > 0:
                     product.price = sale
@@ -296,6 +297,7 @@ class StockAuditCreateSerializer(serializers.Serializer):
                 )
 
                 update_fields = ["updated_at"]
+                # include_stock: jismoniy sanash natijasini ombor qoldig'iga yozadi
                 if include_stock and qty_after is not None:
                     product.quantity = Decimal(str(qty_after))
                     update_fields.append("quantity")

@@ -83,6 +83,12 @@ class Product(models.Model):
     price = models.DecimalField(max_digits=14, decimal_places=2)
     cost_price = models.DecimalField(max_digits=14, decimal_places=2, default=0)
     quantity = models.DecimalField(max_digits=14, decimal_places=3, default=0)
+    min_stock = models.DecimalField(
+        max_digits=14,
+        decimal_places=3,
+        default=0,
+        help_text="Shu qiymatga yetganda kam qoldiq ogohlantiriladi",
+    )
     unit = models.CharField(max_length=20, default="dona")
     unit_ref = models.ForeignKey(
         UnitOfMeasure,

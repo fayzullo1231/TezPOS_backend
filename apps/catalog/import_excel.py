@@ -34,6 +34,40 @@ def _normalize_name(value: Any) -> str:
     return re.sub(r"\s+", " ", str(value).strip())
 
 
+_BARCODE_PLACEHOLDERS = frozenset(
+    {
+        "mavjudemas",
+        "yoq",
+        "yuq",
+        "yox",
+        "net",
+        "нет",
+        "na",
+        "none",
+        "null",
+        "nan",
+        "undefined",
+        "boremas",
+        "notavailable",
+        "notavail",
+        "no",
+        "empty",
+        "bush",
+    }
+)
+
+
+def _is_placeholder_barcode(code: str) -> bool:
+    """Exceldagi «Mavjud emas», «yo'q» va hokazo — shtrix kod emas."""
+    key = re.sub(r"[\s\u00a0\-—–.'`ʻʼ/\\]+", "", (code or "").casefold())
+    if not key or key in _BARCODE_PLACEHOLDERS:
+        return True
+    # Faqat harf/so'z (raqamsiz) — barcode emas
+    if not any(ch.isdigit() for ch in key):
+        return True
+    return False
+
+
 def _normalize_barcode(value: Any) -> str:
     if value is None:
         return ""
@@ -50,7 +84,10 @@ def _normalize_barcode(value: Any) -> str:
         return ""
     if s.endswith(".0") and s[:-2].replace("-", "").isdigit():
         s = s[:-2]
-    return normalize_barcode(s)
+    s = normalize_barcode(s)
+    if not s or _is_placeholder_barcode(s):
+        return ""
+    return s
 
 
 def _parse_price(value: Any) -> Decimal | None:
@@ -60,7 +97,11 @@ def _parse_price(value: Any) -> Decimal | None:
         return None
     try:
         if isinstance(value, str):
-            cleaned = value.replace(" ", "").replace(",", ".")
+            cleaned = (
+                value.replace("\u00a0", "")
+                .replace(" ", "")
+                .replace(",", ".")
+            )
             if not cleaned:
                 return None
             return Decimal(cleaned).quantize(Decimal("0.01"))
@@ -74,7 +115,11 @@ def _parse_quantity(value: Any) -> Decimal | None:
         return None
     try:
         if isinstance(value, str):
-            cleaned = value.replace(" ", "").replace(",", ".")
+            cleaned = (
+                value.replace("\u00a0", "")
+                .replace(" ", "")
+                .replace(",", ".")
+            )
             if not cleaned:
                 return None
             return Decimal(cleaned)
@@ -124,12 +169,86 @@ def _get_cell(row: tuple[Any, ...], idx: int | None) -> Any:
     return row[idx]
 
 
+def _row_width(row: tuple[Any, ...]) -> int:
+    last = 0
+    for i, cell in enumerate(row):
+        if cell is not None and str(cell).strip() != "":
+            last = i + 1
+    return last
+
+
+def _pad_rows(rows: list[tuple[Any, ...]]) -> list[tuple[Any, ...]]:
+    if not rows:
+        return rows
+    max_col = max(len(r) for r in rows)
+    for row in rows[: min(len(rows), 100)]:
+        max_col = max(max_col, _row_width(row))
+    return [
+        tuple(list(row) + [None] * (max_col - len(row))) for row in rows
+    ]
+
+
+def _find_header_row_index(rows: list[tuple[Any, ...]], *, scan: int = 20) -> int:
+    """Eng ko'p to'ldirilgan qator — odatda ustun sarlavhalari."""
+    best_idx = 0
+    best_score = -1
+    for idx, row in enumerate(rows[:scan]):
+        score = sum(
+            1
+            for cell in row
+            if cell is not None and str(cell).strip() not in ("", "0")
+        )
+        if score > best_score:
+            best_score = score
+            best_idx = idx
+    return best_idx
+
+
+def _detect_sheet_bounds(ws, *, max_scan_row: int = 500, max_scan_col: int = 64) -> tuple[int, int]:
+    """ws.max_column ba'zi fayllarda noto'g'ri (1) — haqiqiy kenglikni skanerlash."""
+    last_row = 1
+    last_col = 1
+    row_limit = min(max(int(ws.max_row or 1), 1), max_scan_row)
+    for row_idx in range(1, row_limit + 1):
+        row_has_data = False
+        for col_idx in range(1, max_scan_col + 1):
+            val = ws.cell(row=row_idx, column=col_idx).value
+            if val is None:
+                continue
+            if str(val).strip() == "":
+                continue
+            row_has_data = True
+            if col_idx > last_col:
+                last_col = col_idx
+        if row_has_data:
+            last_row = row_idx
+    return last_row, last_col
+
+
 def _load_rows(uploaded_file) -> list[tuple[Any, ...]]:
-    wb = load_workbook(uploaded_file, read_only=True, data_only=True)
+    try:
+        uploaded_file.seek(0)
+    except (AttributeError, OSError):
+        pass
+    wb = load_workbook(uploaded_file, read_only=False, data_only=True)
     ws = wb.active
-    rows = list(ws.iter_rows(values_only=True))
+    max_row, max_col = _detect_sheet_bounds(ws)
+    rows = [
+        tuple(row)
+        for row in ws.iter_rows(
+            min_row=1,
+            max_row=max_row,
+            min_col=1,
+            max_col=max_col,
+            values_only=True,
+        )
+    ]
     wb.close()
-    return rows
+    try:
+        uploaded_file.seek(0)
+    except (AttributeError, OSError):
+        pass
+    return _pad_rows(rows)
 
 
 def get_import_target_options(tenant) -> list[dict[str, str]]:
@@ -174,14 +293,22 @@ def preview_excel_columns(uploaded_file, tenant=None) -> dict:
             result["target_options"] = get_import_target_options(tenant)
         return result
 
-    header = rows[0]
+    header_idx = _find_header_row_index(rows)
+    header = rows[header_idx]
     columns = []
     for idx, cell in enumerate(header):
         label = str(cell).strip() if cell is not None else ""
-        columns.append({"index": idx, "label": label or f"Ustun {idx + 1}"})
+        if not label:
+            continue
+        columns.append({"index": idx, "label": label})
+    if not columns:
+        for idx, cell in enumerate(header):
+            columns.append(
+                {"index": idx, "label": f"Ustun {idx + 1}"},
+            )
 
     sample_rows = []
-    for row in rows[1:4]:
+    for row in rows[header_idx + 1 : header_idx + 4]:
         sample_rows.append([_cell_preview(c) for c in row])
 
     result = {
@@ -245,7 +372,12 @@ def _suggest_targets(header: tuple[Any, ...], tenant=None) -> dict[str, str]:
             continue
 
         if not name_assigned and (
-            "наименование" in label or label.startswith("номи") or label == "name"
+            "наименование" in label
+            or label.startswith("номи")
+            or label == "name"
+            or label == "товар"
+            or label.startswith("товар ")
+            or label == "tovar"
         ) and "полное" not in label and "полн" not in label:
             suggestions[str(idx)] = "name"
             name_assigned = True
@@ -259,7 +391,7 @@ def _suggest_targets(header: tuple[Any, ...], tenant=None) -> dict[str, str]:
             suggestions[str(idx)] = "cost_price"
         elif any(k in label for k in ("артикул", "sku", "artikul")):
             suggestions[str(idx)] = "sku"
-        elif any(k in label for k in ("мера", "едини", "unit", "o'lchov", "olchov")):
+        elif any(k in label for k in ("мера", "едини", "ед.", "ед ", "unit", "o'lchov", "olchov")):
             suggestions[str(idx)] = "unit"
         elif any(k in label for k in ("колич", "miqdor", "quantity", "qoldiq", "остат")):
             suggestions[str(idx)] = "quantity"
@@ -460,27 +592,49 @@ def _find_existing_product(
     return None
 
 
+def _available_barcodes(tenant, barcodes: list[str], product: Product | None = None) -> list[str]:
+    """Band bo'lmagan shtrix kodlarni qaytaradi (conflictlarni o'tkazib yuboradi)."""
+    available: list[str] = []
+    seen: set[str] = set()
+    for code in barcodes:
+        c = normalize_barcode(code)
+        if not c or c in seen or _is_placeholder_barcode(c):
+            continue
+        qs = ProductBarcode.objects.filter(tenant=tenant, code=c)
+        if product is not None:
+            qs = qs.exclude(product=product)
+        if qs.exists():
+            continue
+        primary = Product.objects.filter(tenant=tenant, barcode=c)
+        if product is not None:
+            primary = primary.exclude(id=product.id)
+        if primary.exists():
+            continue
+        seen.add(c)
+        available.append(c)
+    return available
+
+
 def _merge_barcodes(product: Product, import_barcodes: list[str], tenant) -> list[str]:
     existing = list(product.barcodes.values_list("code", flat=True))
     if not existing and product.barcode:
         existing = [product.barcode]
 
-    merged: list[str] = []
+    own: list[str] = []
     seen: set[str] = set()
-    for code in existing + import_barcodes:
+    for code in existing:
         c = normalize_barcode(code)
-        if not c or c in seen:
-            continue
-        taken = (
-            ProductBarcode.objects.filter(tenant=tenant, code=c)
-            .exclude(product=product)
-            .exists()
-        )
-        if taken:
+        if not c or c in seen or _is_placeholder_barcode(c):
             continue
         seen.add(c)
-        merged.append(c)
-    return merged
+        own.append(c)
+
+    imported = _available_barcodes(tenant, import_barcodes, product)
+    for c in imported:
+        if c not in seen:
+            seen.add(c)
+            own.append(c)
+    return own
 
 
 def _process_product(
@@ -507,6 +661,11 @@ def _process_product(
         raise ValueError("Mahsulot nomi bo'sh")
 
     sku_clean = (sku or "").strip()[:64]
+    barcodes = [
+        c
+        for c in barcodes
+        if c and not _is_placeholder_barcode(c)
+    ]
 
     before_codes = set(
         ProductBarcode.objects.filter(tenant=tenant).values_list("code", flat=True)
@@ -522,6 +681,8 @@ def _process_product(
     list_prices = list_prices or {}
 
     if is_new:
+        # Band kodlarni tashlab, mahsulotni baribir yaratamiz
+        barcodes = _available_barcodes(tenant, barcodes, product=None)
         create_price = price if price is not None else Decimal("0")
         if create_price == 0 and list_prices:
             create_price = next(iter(list_prices.values()))
@@ -536,7 +697,7 @@ def _process_product(
             category=category,
             brand=brand,
             supplier=supplier,
-            quantity=quantity or Decimal("0"),
+            quantity=Decimal("0"),
             barcode=barcodes[0] if barcodes else "",
         )
         action = "created"
@@ -564,9 +725,7 @@ def _process_product(
             product.unit = unit_str
             product.unit_ref = unit_ref
             update_fields.extend(["unit", "unit_ref"])
-        if quantity is not None and product.quantity != quantity:
-            product.quantity = quantity
-            update_fields.append("quantity")
+        # quantity — faqat yangi mahsulotda (create); update da o'zgartirilmaydi
         if category and product.category_id != category.id:
             product.category = category
             update_fields.append("category")
@@ -627,16 +786,19 @@ def import_products_from_excel(
     if column_targets:
         cols = _parse_column_targets(column_targets)
     else:
-        cols = _detect_legacy_columns(rows[0])
+        header_idx = _find_header_row_index(rows)
+        header = rows[header_idx]
+        cols = _detect_legacy_columns(header)
         if cols.get("name") is None:
-            cols = _parse_column_targets(_suggest_targets(rows[0], tenant))
+            cols = _parse_column_targets(_suggest_targets(header, tenant))
 
     name_idx = cols.get("name")
     if name_idx is None:
         empty_stats["row_errors"] = ["«Mahsulot nomi» ustuni tanlanmagan."]
         return empty_stats
 
-    data_rows = rows[1:]
+    header_idx = _find_header_row_index(rows)
+    data_rows = rows[header_idx + 1 :]
 
     grouped: dict[str, dict[str, Any]] = defaultdict(
         lambda: {
