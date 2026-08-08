@@ -24,7 +24,11 @@ class ExternalProductListView(APIView):
 
         products = Product.objects.filter(
             tenant=request.user.tenant, is_active=True
-        ).select_related("category")
+        ).select_related(
+            "category", "unit_ref", "brand", "supplier"
+        ).prefetch_related(
+            "barcodes", "list_prices__price_list", "images"
+        )
         return Response(
             ProductListSerializer(
                 products, many=True, context={"request": request}

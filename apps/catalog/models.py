@@ -116,6 +116,9 @@ class Product(models.Model):
         indexes = [
             models.Index(fields=["tenant", "barcode"]),
             models.Index(fields=["tenant", "name"]),
+            models.Index(fields=["tenant", "is_active"]),
+            models.Index(fields=["tenant", "updated_at"]),
+            models.Index(fields=["tenant", "category"]),
         ]
 
     def __str__(self):

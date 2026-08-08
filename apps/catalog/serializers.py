@@ -69,14 +69,18 @@ def _selling_price_list_for_tenant(tenant_id):
 
 
 def product_list_prices_dict(instance) -> dict[str, str]:
-    """Faqat sotuv bo'lmagan narxlar ro'yxatlari (optom va h.k.). Sotuv narxi — `product.price`."""
-    return {
-        str(row.price_list_id): str(row.price)
-        for row in instance.list_prices.select_related("price_list").filter(
-            price_list__is_active=True,
-            price_list__is_selling=False,
-        )
-    }
+    """Faqat sotuv bo'lmagan narxlar ro'yxatlari (optom va h.k.). Sotuv narxi — `product.price`.
+
+    Prefetch cache ishlatadi — `.filter()`/`.select_related()` qilmaslik (N+1 yo'q).
+    """
+    out: dict[str, str] = {}
+    for row in instance.list_prices.all():
+        pl = getattr(row, "price_list", None)
+        if pl is None:
+            continue
+        if getattr(pl, "is_active", True) and not getattr(pl, "is_selling", False):
+            out[str(row.price_list_id)] = str(row.price)
+    return out
 
 
 def product_image_url(image_field, request) -> str | None:
@@ -102,9 +106,14 @@ def product_images_payload(product, request) -> list[dict]:
 
 
 def product_primary_image_url(product, request) -> str | None:
-    primary = product.images.filter(is_primary=True).order_by("sort_order").first()
-    if not primary:
-        primary = product.images.order_by("sort_order", "created_at").first()
+    # Prefetch cache: .filter()/.order_by() yangi SQL ochadi — list() dan ishlash.
+    images = list(product.images.all())
+    primary = next((row for row in images if row.is_primary), None)
+    if primary is None and images:
+        primary = min(
+            images,
+            key=lambda row: (row.sort_order, getattr(row, "created_at", None) or 0),
+        )
     if primary and primary.image:
         return product_image_url(primary.image, request)
     return product_image_url(product.image, request)
@@ -195,7 +204,7 @@ class ProductSerializer(serializers.ModelSerializer):
 
     def to_representation(self, instance):
         data = super().to_representation(instance)
-        data["barcodes"] = list(instance.barcodes.values_list("code", flat=True))
+        data["barcodes"] = [b.code for b in instance.barcodes.all()]
         data["list_prices"] = product_list_prices_dict(instance)
         return data
 
@@ -475,7 +484,7 @@ class ProductListSerializer(serializers.ModelSerializer):
         return product_primary_image_url(obj, request)
 
     def get_barcodes(self, obj):
-        return list(obj.barcodes.values_list("code", flat=True))
+        return [b.code for b in obj.barcodes.all()]
 
     def get_list_prices(self, obj):
         return product_list_prices_dict(obj)

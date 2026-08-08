@@ -33,8 +33,10 @@ class TenantProductListView(APIView):
 
         products = Product.objects.filter(
             tenant=tenant, is_active=True
-        ).select_related("category", "unit_ref").prefetch_related(
-            "barcodes", "list_prices__price_list"
+        ).select_related(
+            "category", "unit_ref", "brand", "supplier"
+        ).prefetch_related(
+            "barcodes", "list_prices__price_list", "images"
         )
 
         search = (request.query_params.get("search") or "").strip()

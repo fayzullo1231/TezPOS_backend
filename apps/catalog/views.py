@@ -1,5 +1,5 @@
 from django.db.models import Q
-from django.db.models import Count, Max, Sum
+from django.db.models import Count, Max
 from django.http import HttpResponse
 from rest_framework import status, viewsets
 from rest_framework.decorators import action
@@ -13,7 +13,7 @@ from .barcode_lookup import (
 )
 from .import_excel import import_products_from_excel, preview_excel_columns
 from .template_excel import build_import_template
-from .models import Brand, Category, Product, ProductImage, ProductPrice, Supplier, UnitOfMeasure
+from .models import Brand, Category, Product, ProductImage, Supplier, UnitOfMeasure
 from .serializers import (
     BrandSerializer,
     CategorySerializer,
@@ -81,7 +81,9 @@ class UnitOfMeasureViewSet(TenantMixin, viewsets.ModelViewSet):
 
 
 class ProductViewSet(TenantMixin, viewsets.ModelViewSet):
-    queryset = Product.objects.select_related("category", "supplier", "unit_ref").prefetch_related(
+    queryset = Product.objects.select_related(
+        "category", "supplier", "unit_ref", "brand"
+    ).prefetch_related(
         "barcodes", "list_prices__price_list", "images"
     )
     serializer_class = ProductSerializer
@@ -208,28 +210,21 @@ class ProductViewSet(TenantMixin, viewsets.ModelViewSet):
 
     @action(detail=False, methods=["get"], url_path="sync-state")
     def sync_state(self, request):
-        """Yengil sinxron tekshiruv — boshqa kassalar narx/qoldiq o'zgarishini aniqlash."""
+        """Yengil sinxron tekshiruv — boshqa kassalar narx/qoldiq o'zgarishini aniqlash.
+
+        Faqat Max(updated_at) + Count — to'liq Sum/Price scan yo'q (poll tezligi uchun).
+        """
         tenant = request.user.tenant
         agg = Product.objects.filter(tenant=tenant).aggregate(
             max_updated=Max("updated_at"),
             total=Count("id"),
             active_total=Count("id", filter=Q(is_active=True)),
-            qty_sum=Sum("quantity"),
-            price_sum=Sum("price"),
-        )
-        price_agg = ProductPrice.objects.filter(tenant=tenant).aggregate(
-            price_rows=Count("id"),
-            list_price_sum=Sum("price"),
         )
         max_updated = agg["max_updated"]
         revision_parts = [
             max_updated.isoformat() if max_updated else "0",
             str(agg["total"] or 0),
             str(agg["active_total"] or 0),
-            str(agg["qty_sum"] or "0"),
-            str(agg["price_sum"] or "0"),
-            str(price_agg["price_rows"] or 0),
-            str(price_agg["list_price_sum"] or "0"),
         ]
         return Response(
             {
