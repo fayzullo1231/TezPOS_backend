@@ -41,6 +41,7 @@ class SaleReturnSerializer(serializers.ModelSerializer):
     customer_id = serializers.UUIDField(
         write_only=True, required=False, allow_null=True
     )
+    stock_updates = serializers.SerializerMethodField(read_only=True)
 
     class Meta:
         model = SaleReturn
@@ -62,6 +63,7 @@ class SaleReturnSerializer(serializers.ModelSerializer):
             "items",
             "created_at",
             "completed_at",
+            "stock_updates",
         ]
         read_only_fields = [
             "id",
@@ -70,7 +72,11 @@ class SaleReturnSerializer(serializers.ModelSerializer):
             "total",
             "created_at",
             "completed_at",
+            "stock_updates",
         ]
+
+    def get_stock_updates(self, obj):
+        return getattr(obj, "_stock_updates", [])
 
     def create(self, validated_data):
         items_data = validated_data.pop("items", [])

@@ -252,21 +252,74 @@ class SaleReturnViewSet(viewsets.ModelViewSet):
 
 
 class SyncSalesView(APIView):
-    """Offline sotuvlarni serverga yuborish."""
+    """Offline sotuvlarni serverga yuborish — bitta xato butun navbatni to'xtatmasin."""
 
     def post(self, request):
+        from apps.catalog.fifo import stock_snapshot
+        from apps.catalog.models import Product
+        from rest_framework.exceptions import ValidationError as DRFValidationError
+
         sales_data = request.data if isinstance(request.data, list) else [request.data]
         results = []
+        failed = []
+        touched_ids = set()
+
         for sale_data in sales_data:
-            with transaction.atomic():
-                serializer = SyncSaleSerializer(data=sale_data, context={"request": request})
-                serializer.is_valid(raise_exception=True)
-                sale = serializer.save()
-                if not sale.synced_at:
-                    sale.synced_at = timezone.now()
-                    sale.save(update_fields=["synced_at"])
-            results.append(SaleListSerializer(sale).data)
-        return Response({"synced": results, "count": len(results)})
+            client_id = ""
+            if isinstance(sale_data, dict):
+                client_id = str(sale_data.get("client_id") or "")
+            try:
+                with transaction.atomic():
+                    serializer = SyncSaleSerializer(
+                        data=sale_data, context={"request": request}
+                    )
+                    serializer.is_valid(raise_exception=True)
+                    sale = serializer.save()
+                    if not sale.synced_at:
+                        sale.synced_at = timezone.now()
+                        sale.save(update_fields=["synced_at"])
+                    for item in sale.items.all():
+                        touched_ids.add(item.product_id)
+                results.append(SaleListSerializer(sale).data)
+            except DRFValidationError as exc:
+                detail = exc.detail
+                code = "error"
+                available = None
+                requested = None
+                if isinstance(detail, dict):
+                    code = detail.get("code") or code
+                    available = detail.get("available")
+                    requested = detail.get("requested")
+                    msg = detail.get("detail") or detail
+                else:
+                    msg = detail
+                failed.append(
+                    {
+                        "client_id": client_id,
+                        "code": code,
+                        "detail": msg if isinstance(msg, str) else str(msg),
+                        "available": available,
+                        "requested": requested,
+                    }
+                )
+            except Exception as exc:
+                failed.append(
+                    {
+                        "client_id": client_id,
+                        "code": "error",
+                        "detail": str(exc),
+                    }
+                )
+
+        products = Product.objects.filter(id__in=touched_ids)
+        return Response(
+            {
+                "synced": results,
+                "failed": failed,
+                "count": len(results),
+                "stock_updates": stock_snapshot(products),
+            }
+        )
 
 
 class DailyStatsView(APIView):
