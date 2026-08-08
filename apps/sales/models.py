@@ -109,6 +109,9 @@ class Sale(models.Model):
         ordering = ["-created_at"]
         verbose_name = "Buyurtma"
         verbose_name_plural = "Buyurtmalar"
+        indexes = [
+            models.Index(fields=["tenant", "status", "completed_at"]),
+        ]
 
     def __str__(self):
         return f"#{self.receipt_number} — {self.total}"
