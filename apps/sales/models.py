@@ -132,6 +132,25 @@ class SaleItem(models.Model):
         ordering = ["sort_order", "id"]
 
 
+class SaleItemBatch(models.Model):
+    """Sotuv qatori qaysi partiyadan qancha olingani (FIFO snapshot)."""
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    sale_item = models.ForeignKey(
+        SaleItem, on_delete=models.CASCADE, related_name="batch_allocations"
+    )
+    batch = models.ForeignKey(
+        "catalog.StockBatch", on_delete=models.PROTECT, related_name="sale_allocations"
+    )
+    quantity = models.DecimalField(max_digits=14, decimal_places=3)
+    unit_cost = models.DecimalField(max_digits=14, decimal_places=2, default=0)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        verbose_name = "Sotuv partiya sarfi"
+        verbose_name_plural = "Sotuv partiya sarflari"
+
+
 class SaleReturn(models.Model):
     """Qaytarish — buyurtmalardan alohida."""
 
@@ -207,3 +226,22 @@ class SaleReturnItem(models.Model):
         ordering = ["sort_order", "id"]
         verbose_name = "Qaytarish mahsuloti"
         verbose_name_plural = "Qaytarish mahsulotlari"
+
+
+class SaleReturnItemBatch(models.Model):
+    """Qaytarish qaysi partiyaga qaytgani."""
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    return_item = models.ForeignKey(
+        SaleReturnItem, on_delete=models.CASCADE, related_name="batch_allocations"
+    )
+    batch = models.ForeignKey(
+        "catalog.StockBatch", on_delete=models.PROTECT, related_name="return_allocations"
+    )
+    quantity = models.DecimalField(max_digits=14, decimal_places=3)
+    unit_cost = models.DecimalField(max_digits=14, decimal_places=2, default=0)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        verbose_name = "Qaytarish partiya bog'lanishi"
+        verbose_name_plural = "Qaytarish partiya bog'lanishlari"

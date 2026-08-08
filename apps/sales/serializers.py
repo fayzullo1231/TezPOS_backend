@@ -1,14 +1,14 @@
 from decimal import Decimal
 
 from django.db import transaction
-from django.db.models import F
 from django.utils import timezone
 from rest_framework import serializers
 
+from apps.catalog.fifo import InsufficientStockError, consume_fifo, stock_snapshot
 from apps.catalog.models import Product
 
 from .debt_utils import resolve_customer
-from .models import Customer, Sale, SaleItem
+from .models import Customer, Sale, SaleItem, SaleItemBatch
 
 
 class CustomerSerializer(serializers.ModelSerializer):
@@ -23,9 +23,18 @@ class CustomerSerializer(serializers.ModelSerializer):
         return super().create(validated_data)
 
 
+class SaleItemBatchSerializer(serializers.ModelSerializer):
+    batch_number = serializers.IntegerField(source="batch.batch_number", read_only=True)
+
+    class Meta:
+        model = SaleItemBatch
+        fields = ["id", "batch", "batch_number", "quantity", "unit_cost"]
+
+
 class SaleItemSerializer(serializers.ModelSerializer):
     product_id = serializers.UUIDField(required=False)
     sort_order = serializers.IntegerField(required=False, default=0)
+    batch_allocations = SaleItemBatchSerializer(many=True, read_only=True)
 
     class Meta:
         model = SaleItem
@@ -38,8 +47,9 @@ class SaleItemSerializer(serializers.ModelSerializer):
             "discount",
             "total",
             "sort_order",
+            "batch_allocations",
         ]
-        read_only_fields = ["id", "product_name", "total"]
+        read_only_fields = ["id", "product_name", "total", "batch_allocations"]
 
     def to_representation(self, instance):
         data = super().to_representation(instance)
@@ -66,6 +76,7 @@ class SaleSerializer(serializers.ModelSerializer):
     customer_debt = serializers.SerializerMethodField(read_only=True)
     customer_debt_balance = serializers.SerializerMethodField(read_only=True)
     customer_phone = serializers.SerializerMethodField(read_only=True)
+    stock_updates = serializers.SerializerMethodField(read_only=True)
 
     class Meta:
         model = Sale
@@ -91,6 +102,7 @@ class SaleSerializer(serializers.ModelSerializer):
             "items",
             "created_at",
             "completed_at",
+            "stock_updates",
         ]
         read_only_fields = [
             "id",
@@ -102,6 +114,7 @@ class SaleSerializer(serializers.ModelSerializer):
             "customer_debt",
             "customer_debt_balance",
             "customer_phone",
+            "stock_updates",
         ]
 
     def get_customer_debt(self, obj):
@@ -116,6 +129,9 @@ class SaleSerializer(serializers.ModelSerializer):
         if obj.customer_id and obj.customer:
             return obj.customer.phone or ""
         return ""
+
+    def get_stock_updates(self, obj):
+        return getattr(obj, "_stock_updates", [])
 
     def create(self, validated_data):
         items_data = validated_data.pop("items", [])
@@ -184,7 +200,7 @@ class SaleSerializer(serializers.ModelSerializer):
                 if sort_order is None:
                     sort_order = idx
 
-                SaleItem.objects.create(
+                sale_item = SaleItem.objects.create(
                     sale=sale,
                     product=product,
                     product_name=product.name,
@@ -197,9 +213,16 @@ class SaleSerializer(serializers.ModelSerializer):
                 subtotal += line_total
 
                 if sale.status == Sale.STATUS_COMPLETED:
-                    # Atomik kamaytirish — parallel sotuvlarda qoldiq yo'qolmasin
-                    product.quantity = F("quantity") - qty
-                    product.save(update_fields=["quantity", "updated_at"])
+                    try:
+                        consume_fifo(
+                            product,
+                            qty,
+                            sale_item=sale_item,
+                            reference_type="sale",
+                            reference_id=sale.id,
+                        )
+                    except InsufficientStockError as exc:
+                        raise exc.as_validation_error() from exc
 
             sale.subtotal = subtotal
             sale.discount_amount = validated_data.get("discount_amount", Decimal("0"))
@@ -248,6 +271,11 @@ class SaleSerializer(serializers.ModelSerializer):
                     locked.debt = saved_debt + sale.debt_amount
                     locked.save(update_fields=["debt"])
                     sale.customer = locked
+
+            if sale.status == Sale.STATUS_COMPLETED:
+                pids = [row["product_id"] for row in items_data]
+                products = Product.objects.filter(tenant=tenant, id__in=pids)
+                sale._stock_updates = stock_snapshot(products)
 
         return sale
 

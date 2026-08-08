@@ -1,10 +1,10 @@
 from decimal import Decimal
 
 from django.db import transaction
-from django.db.models import F
 from django.utils import timezone
 from rest_framework import serializers
 
+from apps.catalog.fifo import create_return_batch, stock_snapshot
 from apps.catalog.models import Product
 
 from .debt_utils import apply_customer_debt_delta, resolve_customer
@@ -120,7 +120,7 @@ class SaleReturnSerializer(serializers.ModelSerializer):
                 if sort_order is None:
                     sort_order = idx
 
-                SaleReturnItem.objects.create(
+                return_item = SaleReturnItem.objects.create(
                     sale_return=sale_return,
                     product=product,
                     product_name=product.name,
@@ -133,8 +133,13 @@ class SaleReturnSerializer(serializers.ModelSerializer):
                 subtotal += line_total
 
                 if sale_return.status == SaleReturn.STATUS_COMPLETED:
-                    product.quantity = F("quantity") + qty
-                    product.save(update_fields=["quantity", "updated_at"])
+                    create_return_batch(
+                        product,
+                        qty,
+                        return_item=return_item,
+                        unit_cost=product.cost_price,
+                        reference_id=sale_return.id,
+                    )
 
             sale_return.subtotal = subtotal
             sale_return.discount_amount = validated_data.get(
@@ -177,6 +182,11 @@ class SaleReturnSerializer(serializers.ModelSerializer):
                     apply_customer_debt_delta(
                         sale_return.customer, -sale_return.debt_amount
                     )
+
+            if sale_return.status == SaleReturn.STATUS_COMPLETED:
+                pids = [row["product_id"] for row in items_data]
+                products = Product.objects.filter(tenant=tenant, id__in=pids)
+                sale_return._stock_updates = stock_snapshot(products)
 
         return sale_return
 

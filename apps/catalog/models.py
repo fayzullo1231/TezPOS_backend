@@ -299,3 +299,99 @@ class StockAuditItem(models.Model):
     class Meta:
         verbose_name = "Reviziya qatori"
         verbose_name_plural = "Reviziya qatorlari"
+
+
+class StockBatch(models.Model):
+    """FIFO partiya — haqiqiy qoldiq manbai (qty_remaining)."""
+
+    SOURCE_OPENING = "opening"
+    SOURCE_RECEIPT = "receipt"
+    SOURCE_RETURN = "return"
+    SOURCE_AUDIT = "audit"
+    SOURCE_ADJUSTMENT = "adjustment"
+    SOURCE_CHOICES = [
+        (SOURCE_OPENING, "Boshlang'ich"),
+        (SOURCE_RECEIPT, "Kirim"),
+        (SOURCE_RETURN, "Qaytarish"),
+        (SOURCE_AUDIT, "Reviziya"),
+        (SOURCE_ADJUSTMENT, "Tuzatish"),
+    ]
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    tenant = models.ForeignKey(Tenant, on_delete=models.CASCADE, related_name="stock_batches")
+    product = models.ForeignKey(Product, on_delete=models.CASCADE, related_name="stock_batches")
+    batch_number = models.PositiveIntegerField(db_index=True)
+    qty_received = models.DecimalField(max_digits=14, decimal_places=3, default=0)
+    qty_remaining = models.DecimalField(max_digits=14, decimal_places=3, default=0)
+    unit_cost = models.DecimalField(max_digits=14, decimal_places=2, default=0)
+    received_at = models.DateTimeField(db_index=True)
+    source_type = models.CharField(max_length=20, choices=SOURCE_CHOICES, default=SOURCE_RECEIPT)
+    source_id = models.UUIDField(null=True, blank=True)
+    receipt_item = models.OneToOneField(
+        StockReceiptItem,
+        null=True,
+        blank=True,
+        on_delete=models.SET_NULL,
+        related_name="batch",
+    )
+    note = models.CharField(max_length=255, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ["received_at", "batch_number", "created_at"]
+        verbose_name = "Ombor partiyasi"
+        verbose_name_plural = "Ombor partiyalari"
+        indexes = [
+            models.Index(fields=["tenant", "product", "received_at"]),
+            models.Index(fields=["product", "qty_remaining"]),
+        ]
+
+    def __str__(self):
+        return f"#{self.batch_number} {self.product_id} qoldiq={self.qty_remaining}"
+
+
+class StockMovement(models.Model):
+    """Ombor harakati tarixi — KIRIM / SOTUV / RETURN / BEKOR."""
+
+    TYPE_OPENING = "opening"
+    TYPE_RECEIPT = "receipt"
+    TYPE_SALE = "sale"
+    TYPE_RETURN = "return"
+    TYPE_SALE_CANCEL = "sale_cancel"
+    TYPE_RETURN_CANCEL = "return_cancel"
+    TYPE_AUDIT = "audit"
+    TYPE_ADJUSTMENT = "adjustment"
+    TYPE_CHOICES = [
+        (TYPE_OPENING, "Boshlang'ich"),
+        (TYPE_RECEIPT, "Kirim"),
+        (TYPE_SALE, "Sotuv"),
+        (TYPE_RETURN, "Qaytarish"),
+        (TYPE_SALE_CANCEL, "Sotuv bekor"),
+        (TYPE_RETURN_CANCEL, "Qaytarish bekor"),
+        (TYPE_AUDIT, "Reviziya"),
+        (TYPE_ADJUSTMENT, "Tuzatish"),
+    ]
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    tenant = models.ForeignKey(Tenant, on_delete=models.CASCADE, related_name="stock_movements")
+    product = models.ForeignKey(Product, on_delete=models.CASCADE, related_name="stock_movements")
+    batch = models.ForeignKey(
+        StockBatch, null=True, blank=True, on_delete=models.SET_NULL, related_name="movements"
+    )
+    movement_type = models.CharField(max_length=20, choices=TYPE_CHOICES)
+    quantity = models.DecimalField(max_digits=14, decimal_places=3)
+    unit_cost = models.DecimalField(max_digits=14, decimal_places=2, default=0)
+    reference_type = models.CharField(max_length=40, blank=True)
+    reference_id = models.UUIDField(null=True, blank=True)
+    note = models.CharField(max_length=255, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ["-created_at"]
+        verbose_name = "Ombor harakati"
+        verbose_name_plural = "Ombor harakatlari"
+        indexes = [
+            models.Index(fields=["tenant", "product", "-created_at"]),
+            models.Index(fields=["reference_type", "reference_id"]),
+        ]

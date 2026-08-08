@@ -1,16 +1,17 @@
 from decimal import Decimal
 
 from django.db import transaction
-from django.db.models import F
 from django.utils import timezone
 from rest_framework import serializers
 
+from .fifo import InsufficientStockError, create_batch, set_stock_absolute, stock_snapshot
 from .models import (
     PriceList,
     Product,
     ProductPrice,
     StockAudit,
     StockAuditItem,
+    StockBatch,
     StockReceipt,
     StockReceiptItem,
 )
@@ -125,7 +126,7 @@ class StockReceiptCreateSerializer(serializers.Serializer):
                 line_total = cost * qty
                 total += line_total
 
-                StockReceiptItem.objects.create(
+                receipt_item = StockReceiptItem.objects.create(
                     receipt=receipt,
                     product=product,
                     product_name=product.name,
@@ -136,11 +137,21 @@ class StockReceiptCreateSerializer(serializers.Serializer):
                     line_total=line_total,
                 )
 
-                product.quantity = F("quantity") + qty
-                product.cost_price = cost
+                # Yangi partiya — eski partiyalar tannarxi o'zgarmaydi
+                create_batch(
+                    product,
+                    qty,
+                    cost,
+                    source_type=StockBatch.SOURCE_RECEIPT,
+                    source_id=receipt_item.id,
+                    receipt_item=receipt_item,
+                    received_at=receipt.completed_at,
+                    note=f"Kirim #{receipt.receipt_number}",
+                    set_product_cost=True,
+                )
                 if include_selling and sale > 0:
                     product.price = sale
-                product.save(update_fields=["quantity", "cost_price", "price", "updated_at"])
+                    product.save(update_fields=["price", "updated_at"])
 
                 for pl_id, price_str in list_prices.items():
                     pl = PriceList.objects.filter(tenant=tenant, id=pl_id).first()
@@ -155,6 +166,10 @@ class StockReceiptCreateSerializer(serializers.Serializer):
 
             receipt.total = total
             receipt.save(update_fields=["total"])
+            # Frontend haqiqiy qoldiqni backenddan olsin
+            product_ids = [row["product_id"] for row in items_data]
+            products = Product.objects.filter(tenant=tenant, id__in=product_ids)
+            receipt._stock_updates = stock_snapshot(products)
 
         return receipt
 
@@ -176,6 +191,7 @@ class StockReceiptItemReadSerializer(serializers.ModelSerializer):
 
 class StockReceiptReadSerializer(serializers.ModelSerializer):
     items = StockReceiptItemReadSerializer(many=True, read_only=True)
+    stock_updates = serializers.SerializerMethodField()
 
     class Meta:
         model = StockReceipt
@@ -193,7 +209,11 @@ class StockReceiptReadSerializer(serializers.ModelSerializer):
             "created_at",
             "completed_at",
             "items",
+            "stock_updates",
         ]
+
+    def get_stock_updates(self, obj):
+        return getattr(obj, "_stock_updates", [])
 
 
 class StockAuditItemWriteSerializer(serializers.Serializer):
@@ -285,7 +305,7 @@ class StockAuditCreateSerializer(serializers.Serializer):
                     str(k): str(v) for k, v in list_prices_raw.items() if str(k) in valid_lists
                 }
 
-                StockAuditItem.objects.create(
+                audit_item = StockAuditItem.objects.create(
                     audit=audit,
                     product=product,
                     product_name=product.name,
@@ -297,10 +317,17 @@ class StockAuditCreateSerializer(serializers.Serializer):
                 )
 
                 update_fields = ["updated_at"]
-                # include_stock: jismoniy sanash natijasini ombor qoldig'iga yozadi
                 if include_stock and qty_after is not None:
-                    product.quantity = Decimal(str(qty_after))
-                    update_fields.append("quantity")
+                    try:
+                        set_stock_absolute(
+                            product,
+                            Decimal(str(qty_after)),
+                            unit_cost=Decimal(str(cost)) if cost is not None else None,
+                            audit_item=audit_item,
+                        )
+                    except InsufficientStockError as exc:
+                        raise exc.as_validation_error() from exc
+                    product.refresh_from_db(fields=["quantity"])
                 if include_cost and cost is not None:
                     product.cost_price = Decimal(str(cost))
                     update_fields.append("cost_price")
