@@ -1,32 +1,31 @@
-"""Ommaviy elektron chek — autentifikatsiyasiz.
+"""Ommaviy chek ma'lumoti — faqat JSON API (HTML tezpos_site da).
 
-Dizayn manbai: TezPOS_site/templates/sales/public_check.html
-(shu loyihada ham templates/sales/public_check.html nusxasi).
-
-HTML: GET /check/<server>/<ref>/
-JSON: GET /check/<server>/<ref>/?format=json  (tezpos_site uchun)
+GET /api/public/check/<server_name>/<ref>/
+Brauzer /check/... so'rovlari https://tez-pos.uz/check/... ga yo'naltiriladi.
 """
 
 from __future__ import annotations
 
+import os
 from decimal import Decimal
 from uuid import UUID
 
 from django.db.models import Prefetch
-from django.http import JsonResponse
-from django.shortcuts import render
+from django.http import HttpResponseRedirect, JsonResponse
 from django.utils.html import escape
 from django.views import View
 
 from apps.accounts.models import Tenant
 
 from .models import CustomerDebtPayment, Sale, SaleItem
-from .tezpos_logo_data import TEZPOS_LOGO_DATA_URI
-
 
 _ITEMS_PREFETCH = Prefetch(
     "items",
     queryset=SaleItem.objects.order_by("sort_order", "id"),
+)
+
+PUBLIC_CHECK_SITE_BASE = (
+    os.getenv("PUBLIC_CHECK_SITE_BASE", "https://tez-pos.uz").rstrip("/")
 )
 
 
@@ -50,11 +49,6 @@ def _fmt_qty(value) -> str:
     return f"{n.normalize()}"
 
 
-def _logo_url(request=None) -> str:
-    # Base64 — static/media deploy bo'lmasa ham logo ko'rinadi
-    return TEZPOS_LOGO_DATA_URI
-
-
 def _wants_json(request) -> bool:
     if (request.GET.get("format") or "").strip().lower() == "json":
         return True
@@ -62,31 +56,37 @@ def _wants_json(request) -> bool:
     return "application/json" in accept and "text/html" not in accept
 
 
-class PublicReceiptCheckView(View):
-    """
-    GET /check/<server_name>/<ref>/
-    ref = sale UUID | payment UUID | receipt_number (int)
-    Masalan: https://tez-pos.uz/check/xusanuz/a1b2c3d4-.../
-    """
-
-    template_name = "sales/public_check.html"
+class PublicCheckRedirectView(View):
+    """Eski /check/... linklar → tezpos_site (domen)."""
 
     def get(self, request, server_name: str, ref: str):
         slug = (server_name or "").strip()
-        logo = _logo_url(request)
-        as_json = _wants_json(request)
+        ref = (ref or "").strip().rstrip("/")
+        if _wants_json(request):
+            return PublicCheckJsonView.as_view()(request, server_name=slug, ref=ref)
+        return HttpResponseRedirect(f"{PUBLIC_CHECK_SITE_BASE}/check/{slug}/{ref}/")
+
+
+class PublicCheckJsonView(View):
+    """JSON ma'lumot — HTML dizayn tezpos_site da."""
+
+    def get(self, request, server_name: str, ref: str):
+        slug = (server_name or "").strip()
         tenant = Tenant.objects.filter(server_name__iexact=slug).first()
         if not tenant:
-            ctx = {
-                "title": "Do'kon topilmadi",
-                "logo_url": logo,
-                "store_name": "TezPOS",
-                "subtitle": "Elektron chek",
-                "kind": "not_found",
-                "empty_title": "Do'kon topilmadi",
-                "empty_detail": f"Server: <code>{escape(slug)}</code>",
-            }
-            return self._respond(request, ctx, status=404, as_json=as_json)
+            return JsonResponse(
+                {
+                    "ok": False,
+                    "kind": "not_found",
+                    "title": "Do'kon topilmadi",
+                    "store_name": "TezPOS",
+                    "subtitle": "Elektron chek",
+                    "empty_title": "Do'kon topilmadi",
+                    "empty_detail": f"Server: <code>{escape(slug)}</code>",
+                },
+                status=404,
+                json_dumps_params={"ensure_ascii": False},
+            )
 
         ref = (ref or "").strip().rstrip("/")
         payment = None
@@ -140,37 +140,31 @@ class PublicReceiptCheckView(View):
         store = tenant.display_name or tenant.server_name
 
         if payment:
-            return self._respond(
-                request,
-                self._payment_ctx(store, payment, logo),
-                as_json=as_json,
+            return JsonResponse(
+                self._payment_payload(store, payment),
+                json_dumps_params={"ensure_ascii": False},
             )
         if sale:
-            return self._respond(
-                request,
-                self._sale_ctx(store, sale, logo),
-                as_json=as_json,
+            return JsonResponse(
+                self._sale_payload(store, sale),
+                json_dumps_params={"ensure_ascii": False},
             )
 
-        ctx = {
-            "title": "Chek topilmadi",
-            "logo_url": logo,
-            "store_name": store,
-            "subtitle": "Elektron chek",
-            "kind": "not_found",
-            "empty_title": "Chek topilmadi",
-            "empty_detail": f"{escape(store)} — <code>{escape(ref)}</code>",
-        }
-        return self._respond(request, ctx, status=404, as_json=as_json)
+        return JsonResponse(
+            {
+                "ok": False,
+                "kind": "not_found",
+                "title": "Chek topilmadi",
+                "store_name": store,
+                "subtitle": "Elektron chek",
+                "empty_title": "Chek topilmadi",
+                "empty_detail": f"{escape(store)} — <code>{escape(ref)}</code>",
+            },
+            status=404,
+            json_dumps_params={"ensure_ascii": False},
+        )
 
-    def _respond(self, request, ctx: dict, *, status: int = 200, as_json: bool = False):
-        if as_json:
-            payload = {k: v for k, v in ctx.items() if k != "logo_url"}
-            payload["ok"] = ctx.get("kind") != "not_found"
-            return JsonResponse(payload, status=status, json_dumps_params={"ensure_ascii": False})
-        return render(request, self.template_name, ctx, status=status)
-
-    def _payment_ctx(self, store, payment: CustomerDebtPayment, logo: str) -> dict:
+    def _payment_payload(self, store, payment: CustomerDebtPayment) -> dict:
         customer = payment.customer.name if payment.customer_id else "—"
         when = payment.created_at
         when_s = when.strftime("%d.%m.%Y %H:%M") if when else "—"
@@ -179,8 +173,8 @@ class PublicReceiptCheckView(View):
         if balance is None and payment.customer_id:
             balance = payment.customer.debt
         return {
+            "ok": True,
             "title": f"To'lov № {payment.receipt_number} — {store}",
-            "logo_url": logo,
             "store_name": store,
             "subtitle": f"Qarz to'lovi № {payment.receipt_number}",
             "kind": "payment",
@@ -193,7 +187,7 @@ class PublicReceiptCheckView(View):
             "debt_balance": _fmt_money(balance),
         }
 
-    def _sale_ctx(self, store, sale: Sale, logo: str) -> dict:
+    def _sale_payload(self, store, sale: Sale) -> dict:
         cashier = ""
         if sale.user_id:
             u = sale.user
@@ -229,8 +223,8 @@ class PublicReceiptCheckView(View):
             debt_balance = _fmt_money(sale.customer.debt)
 
         return {
+            "ok": True,
             "title": f"Chek № {sale.receipt_number} — {store}",
-            "logo_url": logo,
             "store_name": store,
             "subtitle": f"Elektron chek № {sale.receipt_number}",
             "kind": "sale",
@@ -247,3 +241,7 @@ class PublicReceiptCheckView(View):
             "debt_amount": _fmt_money(sale.debt_amount),
             "debt_balance": debt_balance,
         }
+
+
+# Eski importlar uchun alias
+PublicReceiptCheckView = PublicCheckRedirectView
