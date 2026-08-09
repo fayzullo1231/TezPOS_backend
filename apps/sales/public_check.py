@@ -7,8 +7,10 @@ Brauzer /check/... so'rovlari https://tez-pos.uz/check/... ga yo'naltiriladi.
 from __future__ import annotations
 
 import os
+from datetime import datetime
 from decimal import Decimal
 from uuid import UUID
+from zoneinfo import ZoneInfo
 
 from django.db.models import Prefetch
 from django.http import HttpResponseRedirect, JsonResponse
@@ -28,6 +30,7 @@ _ITEMS_PREFETCH = Prefetch(
 PUBLIC_CHECK_SITE_BASE = (
     os.getenv("PUBLIC_CHECK_SITE_BASE", "https://tez-pos.uz").rstrip("/")
 )
+_UZ_TZ = ZoneInfo("Asia/Tashkent")
 
 
 def _fmt_money(value) -> str:
@@ -51,15 +54,21 @@ def _fmt_qty(value) -> str:
 
 
 def _fmt_when(when) -> str:
-    """O'zbekiston vaqti (Asia/Tashkent) — soat:daqiqa."""
+    """Har doim O'zbekiston (Asia/Tashkent) soat:daqiqa."""
     if not when:
         return "—"
     try:
-        local = timezone.localtime(when)
+        if isinstance(when, str):
+            raw = when.strip().replace("Z", "+00:00")
+            when = datetime.fromisoformat(raw)
+        if timezone.is_naive(when):
+            # Naive qiymat odatda UTC da saqlangan (ISO/Z clientdan)
+            when = timezone.make_aware(when, ZoneInfo("UTC"))
+        local = when.astimezone(_UZ_TZ)
         return local.strftime("%d.%m.%Y %H:%M")
     except Exception:
         try:
-            return when.strftime("%d.%m.%Y %H:%M")
+            return timezone.localtime(when, _UZ_TZ).strftime("%d.%m.%Y %H:%M")
         except Exception:
             return "—"
 
