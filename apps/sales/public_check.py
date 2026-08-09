@@ -1,18 +1,27 @@
-"""Ommaviy elektron chek — autentifikatsiyasiz."""
+"""Ommaviy elektron chek — autentifikatsiyasiz.
+
+Dizayn manbai: TezPOS_site/templates/sales/public_check.html
+(shu loyihada ham templates/sales/public_check.html nusxasi).
+
+HTML: GET /check/<server>/<ref>/
+JSON: GET /check/<server>/<ref>/?format=json  (tezpos_site uchun)
+"""
 
 from __future__ import annotations
 
 from decimal import Decimal
 from uuid import UUID
 
-from django.http import HttpResponse
 from django.db.models import Prefetch
+from django.http import JsonResponse
+from django.shortcuts import render
 from django.utils.html import escape
 from django.views import View
 
 from apps.accounts.models import Tenant
 
 from .models import CustomerDebtPayment, Sale, SaleItem
+from .tezpos_logo_data import TEZPOS_LOGO_DATA_URI
 
 
 _ITEMS_PREFETCH = Prefetch(
@@ -41,34 +50,16 @@ def _fmt_qty(value) -> str:
     return f"{n.normalize()}"
 
 
-def _html_page(title: str, body: str, status: int = 200) -> HttpResponse:
-    html = f"""<!DOCTYPE html>
-<html lang="uz">
-<head>
-  <meta charset="utf-8"/>
-  <meta name="viewport" content="width=device-width, initial-scale=1"/>
-  <title>{escape(title)}</title>
-</head>
-<body style="margin:0;background:#eef1f6;font-family:system-ui,-apple-system,Segoe UI,Roboto,sans-serif;color:#0f172a">
-  <div style="max-width:480px;margin:40px auto;padding:0 16px">
-    {body}
-  </div>
-</body>
-</html>"""
-    return HttpResponse(html, status=status, content_type="text/html; charset=utf-8")
+def _logo_url(request=None) -> str:
+    # Base64 — static/media deploy bo'lmasa ham logo ko'rinadi
+    return TEZPOS_LOGO_DATA_URI
 
 
-def _not_found(title: str, detail: str) -> HttpResponse:
-    return _html_page(
-        title,
-        f"""
-        <div style="background:#fff;border-radius:16px;padding:28px 22px;text-align:center;box-shadow:0 8px 30px rgba(15,23,42,.08)">
-          <div style="font-size:18px;font-weight:700;margin-bottom:8px">{escape(title)}</div>
-          <div style="color:#64748b;font-size:14px">{detail}</div>
-        </div>
-        """,
-        status=404,
-    )
+def _wants_json(request) -> bool:
+    if (request.GET.get("format") or "").strip().lower() == "json":
+        return True
+    accept = (request.headers.get("Accept") or "").lower()
+    return "application/json" in accept and "text/html" not in accept
 
 
 class PublicReceiptCheckView(View):
@@ -76,17 +67,26 @@ class PublicReceiptCheckView(View):
     GET /check/<server_name>/<ref>/
     ref = sale UUID | payment UUID | receipt_number (int)
     Masalan: https://tez-pos.uz/check/xusanuz/a1b2c3d4-.../
-             https://tez-pos.uz/check/xusanuz/4/
     """
+
+    template_name = "sales/public_check.html"
 
     def get(self, request, server_name: str, ref: str):
         slug = (server_name or "").strip()
+        logo = _logo_url(request)
+        as_json = _wants_json(request)
         tenant = Tenant.objects.filter(server_name__iexact=slug).first()
         if not tenant:
-            return _not_found(
-                "Do'kon topilmadi",
-                f"Server: <code>{escape(slug)}</code>",
-            )
+            ctx = {
+                "title": "Do'kon topilmadi",
+                "logo_url": logo,
+                "store_name": "TezPOS",
+                "subtitle": "Elektron chek",
+                "kind": "not_found",
+                "empty_title": "Do'kon topilmadi",
+                "empty_detail": f"Server: <code>{escape(slug)}</code>",
+            }
+            return self._respond(request, ctx, status=404, as_json=as_json)
 
         ref = (ref or "").strip().rstrip("/")
         payment = None
@@ -137,62 +137,71 @@ class PublicReceiptCheckView(View):
                     .first()
                 )
 
-        if payment:
-            return self._render_payment(tenant, payment)
-        if sale:
-            return self._render_sale(tenant, sale)
-        return _not_found(
-            "Chek topilmadi",
-            f"{escape(tenant.display_name or tenant.server_name)} — <code>{escape(ref)}</code>",
-        )
+        store = tenant.display_name or tenant.server_name
 
-    def _render_payment(self, tenant, payment: CustomerDebtPayment) -> HttpResponse:
-        store = escape(tenant.display_name or tenant.server_name)
-        customer = escape(payment.customer.name if payment.customer_id else "—")
+        if payment:
+            return self._respond(
+                request,
+                self._payment_ctx(store, payment, logo),
+                as_json=as_json,
+            )
+        if sale:
+            return self._respond(
+                request,
+                self._sale_ctx(store, sale, logo),
+                as_json=as_json,
+            )
+
+        ctx = {
+            "title": "Chek topilmadi",
+            "logo_url": logo,
+            "store_name": store,
+            "subtitle": "Elektron chek",
+            "kind": "not_found",
+            "empty_title": "Chek topilmadi",
+            "empty_detail": f"{escape(store)} — <code>{escape(ref)}</code>",
+        }
+        return self._respond(request, ctx, status=404, as_json=as_json)
+
+    def _respond(self, request, ctx: dict, *, status: int = 200, as_json: bool = False):
+        if as_json:
+            payload = {k: v for k, v in ctx.items() if k != "logo_url"}
+            payload["ok"] = ctx.get("kind") != "not_found"
+            return JsonResponse(payload, status=status, json_dumps_params={"ensure_ascii": False})
+        return render(request, self.template_name, ctx, status=status)
+
+    def _payment_ctx(self, store, payment: CustomerDebtPayment, logo: str) -> dict:
+        customer = payment.customer.name if payment.customer_id else "—"
         when = payment.created_at
         when_s = when.strftime("%d.%m.%Y %H:%M") if when else "—"
         paid = payment.amount or Decimal("0")
         balance = payment.balance_after
         if balance is None and payment.customer_id:
             balance = payment.customer.debt
-        body = f"""
-    <div style="background:#fff;border-radius:16px;box-shadow:0 8px 30px rgba(15,23,42,.08);overflow:hidden">
-      <div style="padding:20px 20px 12px;border-bottom:1px solid #eef1f6;text-align:center">
-        <div style="font-size:20px;font-weight:800">{store}</div>
-        <div style="margin-top:6px;color:#64748b;font-size:13px">Qarz to'lovi № {payment.receipt_number}</div>
-      </div>
-      <div style="padding:16px 20px;font-size:13px;color:#475569;line-height:1.6">
-        <div style="display:flex;justify-content:space-between"><span>Sana</span><strong style="color:#0f172a">{when_s}</strong></div>
-        <div style="display:flex;justify-content:space-between"><span>Mijoz</span><strong style="color:#0f172a">{customer}</strong></div>
-        <div style="display:flex;justify-content:space-between"><span>Turi</span><strong style="color:#0f172a">Qarz to'lovi</strong></div>
-      </div>
-      <div style="padding:16px 20px 20px;border-top:1px solid #eef1f6">
-        <div style="margin-top:4px;padding:12px;border-radius:12px;background:#ecfdf5;border:1px solid #a7f3d0">
-          <div style="display:flex;justify-content:space-between;margin-bottom:6px">
-            <span style="color:#065f46">Qarz</span>
-            <strong style="color:#047857">{_fmt_money(-paid)}</strong>
-          </div>
-          <div style="display:flex;justify-content:space-between">
-            <span style="color:#065f46">Qoldiq</span>
-            <strong style="color:#047857">{_fmt_money(balance)}</strong>
-          </div>
-        </div>
-      </div>
-    </div>
-    <div style="text-align:center;color:#94a3b8;font-size:11px;margin-top:16px">TezPOS</div>
-        """
-        return _html_page(f"To'lov № {payment.receipt_number} — {store}", body)
+        return {
+            "title": f"To'lov № {payment.receipt_number} — {store}",
+            "logo_url": logo,
+            "store_name": store,
+            "subtitle": f"Qarz to'lovi № {payment.receipt_number}",
+            "kind": "payment",
+            "meta_rows": [
+                {"label": "Sana", "value": when_s},
+                {"label": "Mijoz", "value": customer},
+                {"label": "Turi", "value": "Qarz to'lovi"},
+            ],
+            "debt_amount": _fmt_money(-paid),
+            "debt_balance": _fmt_money(balance),
+        }
 
-    def _render_sale(self, tenant, sale: Sale) -> HttpResponse:
-        store = escape(tenant.display_name or tenant.server_name)
+    def _sale_ctx(self, store, sale: Sale, logo: str) -> dict:
         cashier = ""
         if sale.user_id:
             u = sale.user
-            cashier = escape(
+            cashier = (
                 (getattr(u, "first_name", None) or "")
                 or (getattr(u, "username", None) or "")
             )
-        customer = escape(sale.customer_name or "—")
+        customer = sale.customer_name or "—"
         when = sale.completed_at or sale.created_at
         when_s = when.strftime("%d.%m.%Y %H:%M") if when else "—"
 
@@ -204,75 +213,37 @@ class PublicReceiptCheckView(View):
         }
         pay = pay_map.get(sale.payment_type, sale.payment_type)
 
-        rows = []
-        for idx, it in enumerate(sale.items.all(), start=1):
-            rows.append(
-                "<tr>"
-                f"<td style='padding:8px 4px;border-bottom:1px solid #eee;color:#64748b'>{idx}</td>"
-                f"<td style='padding:8px 4px;border-bottom:1px solid #eee'>{escape(it.product_name)}</td>"
-                f"<td style='padding:8px 4px;border-bottom:1px solid #eee;text-align:right'>{_fmt_qty(it.quantity)}</td>"
-                f"<td style='padding:8px 4px;border-bottom:1px solid #eee;text-align:right'>{_fmt_money(it.unit_price)}</td>"
-                f"<td style='padding:8px 4px;border-bottom:1px solid #eee;text-align:right;font-weight:600'>{_fmt_money(it.total)}</td>"
-                "</tr>"
-            )
+        items = [
+            {
+                "name": it.product_name,
+                "qty": _fmt_qty(it.quantity),
+                "price": _fmt_money(it.unit_price),
+                "total": _fmt_money(it.total),
+            }
+            for it in sale.items.all()
+        ]
 
-        debt_block = ""
-        if sale.payment_type == Sale.PAYMENT_CREDIT or (sale.debt_amount or 0) > 0:
-            balance = "—"
-            if sale.customer_id and sale.customer:
-                balance = _fmt_money(sale.customer.debt)
-            debt_block = f"""
-            <div style="margin-top:16px;padding:12px;border-radius:12px;background:#fff7ed;border:1px solid #fed7aa">
-              <div style="display:flex;justify-content:space-between;margin-bottom:6px">
-                <span style="color:#9a3412">Qarz</span>
-                <strong style="color:#c2410c">{_fmt_money(sale.debt_amount)}</strong>
-              </div>
-              <div style="display:flex;justify-content:space-between">
-                <span style="color:#9a3412">Qoldiq</span>
-                <strong style="color:#c2410c">{balance}</strong>
-              </div>
-            </div>
-            """
+        show_debt = sale.payment_type == Sale.PAYMENT_CREDIT or (sale.debt_amount or 0) > 0
+        debt_balance = "—"
+        if show_debt and sale.customer_id and sale.customer:
+            debt_balance = _fmt_money(sale.customer.debt)
 
-        body = f"""
-    <div style="background:#fff;border-radius:16px;box-shadow:0 8px 30px rgba(15,23,42,.08);overflow:hidden">
-      <div style="padding:20px 20px 12px;border-bottom:1px solid #eef1f6;text-align:center">
-        <div style="font-size:20px;font-weight:800;letter-spacing:-.02em">{store}</div>
-        <div style="margin-top:6px;color:#64748b;font-size:13px">Elektron chek № {sale.receipt_number}</div>
-      </div>
-      <div style="padding:16px 20px;font-size:13px;color:#475569;line-height:1.6">
-        <div style="display:flex;justify-content:space-between"><span>Sana</span><strong style="color:#0f172a">{when_s}</strong></div>
-        <div style="display:flex;justify-content:space-between"><span>Kassir</span><strong style="color:#0f172a">{cashier or "—"}</strong></div>
-        <div style="display:flex;justify-content:space-between"><span>Mijoz</span><strong style="color:#0f172a">{customer}</strong></div>
-        <div style="display:flex;justify-content:space-between"><span>To'lov</span><strong style="color:#0f172a">{pay}</strong></div>
-      </div>
-      <div style="padding:0 12px 8px">
-        <table style="width:100%;border-collapse:collapse;font-size:13px">
-          <thead>
-            <tr style="color:#94a3b8;text-align:left">
-              <th style="padding:8px 4px;font-weight:600">#</th>
-              <th style="padding:8px 4px;font-weight:600">Mahsulot</th>
-              <th style="padding:8px 4px;font-weight:600;text-align:right">Soni</th>
-              <th style="padding:8px 4px;font-weight:600;text-align:right">Narx</th>
-              <th style="padding:8px 4px;font-weight:600;text-align:right">Summa</th>
-            </tr>
-          </thead>
-          <tbody>
-            {''.join(rows) if rows else "<tr><td colspan='5' style='padding:12px;color:#94a3b8;text-align:center'>Mahsulot yo'q</td></tr>"}
-          </tbody>
-        </table>
-      </div>
-      <div style="padding:16px 20px 20px;border-top:1px solid #eef1f6">
-        <div style="display:flex;justify-content:space-between;font-size:15px;margin-bottom:6px">
-          <span style="color:#64748b">Jami</span>
-          <strong>{_fmt_money(sale.total)}</strong>
-        </div>
-        <div style="display:flex;justify-content:space-between;font-size:13px;color:#64748b">
-          <span>To'langan</span><span>{_fmt_money(sale.paid_amount)}</span>
-        </div>
-        {debt_block}
-      </div>
-    </div>
-    <div style="text-align:center;color:#94a3b8;font-size:11px;margin-top:16px">TezPOS</div>
-        """
-        return _html_page(f"Chek № {sale.receipt_number} — {store}", body)
+        return {
+            "title": f"Chek № {sale.receipt_number} — {store}",
+            "logo_url": logo,
+            "store_name": store,
+            "subtitle": f"Elektron chek № {sale.receipt_number}",
+            "kind": "sale",
+            "meta_rows": [
+                {"label": "Sana", "value": when_s},
+                {"label": "Kassir", "value": cashier or "—"},
+                {"label": "Mijoz", "value": customer},
+                {"label": "To'lov", "value": pay},
+            ],
+            "items": items,
+            "total": _fmt_money(sale.total),
+            "paid": _fmt_money(sale.paid_amount),
+            "show_debt": show_debt,
+            "debt_amount": _fmt_money(sale.debt_amount),
+            "debt_balance": debt_balance,
+        }
