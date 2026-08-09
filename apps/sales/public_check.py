@@ -12,6 +12,7 @@ from uuid import UUID
 
 from django.db.models import Prefetch
 from django.http import HttpResponseRedirect, JsonResponse
+from django.utils import timezone
 from django.utils.html import escape
 from django.views import View
 
@@ -47,6 +48,20 @@ def _fmt_qty(value) -> str:
     if n == n.to_integral_value():
         return str(int(n))
     return f"{n.normalize()}"
+
+
+def _fmt_when(when) -> str:
+    """O'zbekiston vaqti (Asia/Tashkent) — soat:daqiqa."""
+    if not when:
+        return "—"
+    try:
+        local = timezone.localtime(when)
+        return local.strftime("%d.%m.%Y %H:%M")
+    except Exception:
+        try:
+            return when.strftime("%d.%m.%Y %H:%M")
+        except Exception:
+            return "—"
 
 
 def _wants_json(request) -> bool:
@@ -167,7 +182,7 @@ class PublicCheckJsonView(View):
     def _payment_payload(self, store, payment: CustomerDebtPayment) -> dict:
         customer = payment.customer.name if payment.customer_id else "—"
         when = payment.created_at
-        when_s = when.strftime("%d.%m.%Y %H:%M") if when else "—"
+        when_s = _fmt_when(when)
         paid = payment.amount or Decimal("0")
         balance = payment.balance_after
         if balance is None and payment.customer_id:
@@ -197,7 +212,7 @@ class PublicCheckJsonView(View):
             )
         customer = sale.customer_name or "—"
         when = sale.completed_at or sale.created_at
-        when_s = when.strftime("%d.%m.%Y %H:%M") if when else "—"
+        when_s = _fmt_when(when)
 
         pay_map = {
             Sale.PAYMENT_CASH: "Naqd",

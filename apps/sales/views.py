@@ -1,5 +1,6 @@
 from datetime import timedelta
 from decimal import Decimal
+import os
 
 from django.db.models import Count, Prefetch, Q, Sum
 from django.db import transaction
@@ -103,6 +104,7 @@ class CustomerViewSet(viewsets.ModelViewSet):
                 "balance_before": str(current),
                 "payment_type": payment.payment_type,
                 "check_path": f"/check/{tenant.server_name}/{payment.id}/",
+                "check_url": f"{os.getenv('PUBLIC_CHECK_SITE_BASE', 'https://tez-pos.uz').rstrip('/')}/check/{tenant.server_name}/{payment.id}/",
                 "customer": {
                     "id": str(customer.id),
                     "name": customer.name,
