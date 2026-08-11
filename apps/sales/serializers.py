@@ -297,6 +297,7 @@ class SaleListSerializer(serializers.ModelSerializer):
         model = Sale
         fields = [
             "id",
+            "client_id",
             "receipt_number",
             "customer_name",
             "subtotal",
