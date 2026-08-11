@@ -188,22 +188,32 @@ class SaleSerializer(serializers.ModelSerializer):
             )
 
             subtotal = Decimal("0")
+            touched_pids = []
             for idx, item_data in enumerate(items_data):
-                product = Product.objects.select_for_update().get(
-                    id=item_data["product_id"], tenant=tenant
-                )
+                pid = item_data.get("product_id")
+                product = None
+                if pid:
+                    try:
+                        product = Product.objects.select_for_update().get(
+                            id=pid, tenant=tenant
+                        )
+                    except Product.DoesNotExist:
+                        product = None
+
                 qty = Decimal(str(item_data["quantity"]))
-                unit_price = Decimal(str(item_data.get("unit_price", product.price)))
+                fallback_price = Decimal(str(item_data.get("price") or item_data.get("unit_price") or 0))
+                unit_price = Decimal(str(item_data.get("unit_price", product.price if product else fallback_price)))
                 discount = Decimal(str(item_data.get("discount", 0)))
                 line_total = qty * unit_price - discount
                 sort_order = item_data.get("sort_order")
                 if sort_order is None:
                     sort_order = idx
 
+                product_name = (product.name if product else None) or item_data.get("product_name") or "Noma'lum mahsulot"
                 sale_item = SaleItem.objects.create(
                     sale=sale,
                     product=product,
-                    product_name=product.name,
+                    product_name=product_name,
                     quantity=qty,
                     unit_price=unit_price,
                     discount=discount,
@@ -212,7 +222,7 @@ class SaleSerializer(serializers.ModelSerializer):
                 )
                 subtotal += line_total
 
-                if sale.status == Sale.STATUS_COMPLETED:
+                if product and sale.status == Sale.STATUS_COMPLETED:
                     try:
                         consume_fifo(
                             product,
@@ -223,6 +233,7 @@ class SaleSerializer(serializers.ModelSerializer):
                         )
                     except InsufficientStockError as exc:
                         raise exc.as_validation_error() from exc
+                    touched_pids.append(pid)
 
             sale.subtotal = subtotal
             sale.discount_amount = validated_data.get("discount_amount", Decimal("0"))
@@ -273,8 +284,7 @@ class SaleSerializer(serializers.ModelSerializer):
                     sale.customer = locked
 
             if sale.status == Sale.STATUS_COMPLETED:
-                pids = [row["product_id"] for row in items_data]
-                products = Product.objects.filter(tenant=tenant, id__in=pids)
+                products = Product.objects.filter(tenant=tenant, id__in=touched_pids)
                 sale._stock_updates = stock_snapshot(products)
 
         return sale
