@@ -291,7 +291,10 @@ class SyncSalesView(APIView):
                         sale.save(update_fields=["synced_at"])
                     for item in sale.items.all():
                         touched_ids.add(item.product_id)
-                results.append(SaleListSerializer(sale).data)
+                data = SaleListSerializer(sale).data
+                if client_id:
+                    data["client_id"] = client_id
+                results.append(data)
             except DRFValidationError as exc:
                 detail = exc.detail
                 code = "error"

@@ -191,25 +191,41 @@ class SaleSerializer(serializers.ModelSerializer):
             touched_pids = []
             for idx, item_data in enumerate(items_data):
                 pid = item_data.get("product_id")
-                product = None
-                if pid:
-                    try:
-                        product = Product.objects.select_for_update().get(
-                            id=pid, tenant=tenant
-                        )
-                    except Product.DoesNotExist:
-                        product = None
+                if not pid:
+                    raise serializers.ValidationError(
+                        {
+                            "detail": "Mahsulot ID majburiy (offline sync).",
+                            "code": "missing_product_id",
+                        }
+                    )
+                try:
+                    product = Product.objects.select_for_update().get(
+                        id=pid, tenant=tenant
+                    )
+                except Product.DoesNotExist as exc:
+                    raise serializers.ValidationError(
+                        {
+                            "detail": f"Mahsulot topilmadi: {pid}",
+                            "code": "product_not_found",
+                            "product_id": str(pid),
+                        }
+                    ) from exc
 
                 qty = Decimal(str(item_data["quantity"]))
-                fallback_price = Decimal(str(item_data.get("price") or item_data.get("unit_price") or 0))
-                unit_price = Decimal(str(item_data.get("unit_price", product.price if product else fallback_price)))
+                unit_price = Decimal(
+                    str(
+                        item_data.get("unit_price")
+                        if item_data.get("unit_price") is not None
+                        else item_data.get("price", product.price)
+                    )
+                )
                 discount = Decimal(str(item_data.get("discount", 0)))
                 line_total = qty * unit_price - discount
                 sort_order = item_data.get("sort_order")
                 if sort_order is None:
                     sort_order = idx
 
-                product_name = (product.name if product else None) or item_data.get("product_name") or "Noma'lum mahsulot"
+                product_name = product.name or item_data.get("product_name") or "Noma'lum mahsulot"
                 sale_item = SaleItem.objects.create(
                     sale=sale,
                     product=product,
@@ -222,7 +238,11 @@ class SaleSerializer(serializers.ModelSerializer):
                 )
                 subtotal += line_total
 
-                if product and sale.status == Sale.STATUS_COMPLETED:
+                if sale.status == Sale.STATUS_COMPLETED:
+                    allow_neg = bool(
+                        self.context.get("sync_allow_negative")
+                        or self.context.get("allow_negative_stock")
+                    )
                     try:
                         consume_fifo(
                             product,
@@ -230,6 +250,7 @@ class SaleSerializer(serializers.ModelSerializer):
                             sale_item=sale_item,
                             reference_type="sale",
                             reference_id=sale.id,
+                            allow_negative=allow_neg,
                         )
                     except InsufficientStockError as exc:
                         raise exc.as_validation_error() from exc
@@ -359,7 +380,9 @@ class SyncSaleSerializer(serializers.Serializer):
         if shift:
             payload["shift"] = shift
 
-        sale = SaleSerializer(context=self.context).create(payload)
+        # Offline sync: qoldiq yetmasa ham sotuv yozilsin (multi-kassa)
+        ctx = {**self.context, "sync_allow_negative": True}
+        sale = SaleSerializer(context=ctx).create(payload)
         if created_at:
             sale.completed_at = created_at
             sale.save(update_fields=["completed_at"])
