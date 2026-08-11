@@ -12,7 +12,15 @@ from rest_framework.response import Response
 from rest_framework.views import APIView
 
 from .debt_utils import apply_customer_debt_delta
-from .models import Customer, CustomerDebtPayment, Sale, SaleItem, SaleReturn, SaleReturnItem
+from .models import (
+    Customer,
+    CustomerDebtPayment,
+    Sale,
+    SaleItem,
+    SaleItemBatch,
+    SaleReturn,
+    SaleReturnItem,
+)
 from .return_serializers import (
     SaleReturnListSerializer,
     SaleReturnSerializer,
@@ -118,14 +126,15 @@ class CustomerViewSet(viewsets.ModelViewSet):
 
 class SaleViewSet(viewsets.ModelViewSet):
     def get_queryset(self):
+        items_qs = SaleItem.objects.order_by("sort_order", "id").prefetch_related(
+            Prefetch(
+                "batch_allocations",
+                queryset=SaleItemBatch.objects.select_related("batch"),
+            )
+        )
         qs = (
             Sale.objects.filter(tenant=self.request.user.tenant)
-            .prefetch_related(
-                Prefetch(
-                    "items",
-                    queryset=SaleItem.objects.order_by("sort_order", "id"),
-                )
-            )
+            .prefetch_related(Prefetch("items", queryset=items_qs))
             .select_related("customer", "user")
         )
         params = self.request.query_params
