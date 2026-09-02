@@ -71,8 +71,9 @@ while IFS= read -r -d '' f; do
   IFS='|' read -r sales neg tannarx < <(db_stats "$f")
   printf "%6s sotuv | %4s minus | %12s so'm | %6s | %s | %s\n" "$sales" "$neg" "$tannarx" "$size" "$mtime" "$f"
 done < <(
-  find /opt/tezpos-backend/data /opt/tezpos-backend /root /var/backups /home -name 'tezpos.db*' -type f -print0 2>/dev/null \
-    | sort -z -u
+  find /root /opt/tezpos-backend/data /opt/tezpos-backend /var/backups /home \
+    \( -name 'tezpos.db' -o -name 'tezpos.db.*' -o -name 'tezpos_*.db' -o -name 'tezpos_current*.db' \) \
+    -type f -print0 2>/dev/null | sort -z -u
 )
 
 echo ""

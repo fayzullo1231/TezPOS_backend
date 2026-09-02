@@ -31,6 +31,8 @@ if [[ ! -f "$SRC" ]]; then
   exit 1
 fi
 
+chmod 644 "$SRC" 2>/dev/null || true
+
 echo "==> Qoldiq tiklash (faqat quantity): $SRC"
 if [[ "${2:-}" == "--apply" ]]; then
   sudo -u tezpos $PY manage.py restore_stock_from_sqlite "$SRC"
