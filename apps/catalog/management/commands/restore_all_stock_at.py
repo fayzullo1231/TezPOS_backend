@@ -1,15 +1,19 @@
 """
-Barcha mahsulot qoldig'ini 14:40 (yoki boshqa anchor) holatiga qaytarish.
+Barcha mahsulot qoldig'ini anchor vaqtga qaytarish.
 
-Muammo: jurnalda faqat ~280 ta mahsulot bor, 1510 tadan ko'pida jurnal=0.
-Shuning uchun --method best:
-  1) jurnal (14:40 gacha harakat bor bo'lsa)
-  2) oxirgi reviziya (14:40 gacha)
-  3) unwind: hozir + sotuv - kirim + qaytarish (keyingi sotuvlarni bekor qilish)
+DIQQAT: 14:40 da DB zaxirasi yo'q. Jurnal ko'p mahsulotda 0.
+Eski reviziya (avgust) ishlatilmasin — noto'g'ri qiymat beradi.
+
+Usullar:
+  unwind  — hozir + sotuv(keyin) - kirim(keyin) + qaytarish(keyin)  [tavsiya]
+  ledger  — faqat jurnal(anchor gacha); ko'pini 0 qiladi
+  flow    — jurnal(anchor) + kirim - sotuv + qaytarish (hozirgi holat)
+  best    — ledger yoki unwind (reviziya ISHLATILMAYDI)
+
+100% aniq: export_stock_csv + set_product_stock --csv
 
 Ishlatish:
-  python manage.py restore_all_stock_at --tenant kuloloptom --method best --dry-run
-  python manage.py restore_all_stock_at --tenant kuloloptom --method best
+  python manage.py restore_all_stock_at --tenant kuloloptom --method unwind --dry-run
 """
 
 from __future__ import annotations
@@ -25,7 +29,7 @@ from django.utils import timezone
 
 from apps.accounts.models import Tenant
 from apps.catalog.fifo import set_stock_absolute
-from apps.catalog.models import Product, StockAuditItem, StockMovement, StockReceipt, StockReceiptItem
+from apps.catalog.models import Product, StockMovement, StockReceipt, StockReceiptItem
 from apps.sales.models import Sale, SaleItem, SaleReturn, SaleReturnItem
 
 ZERO = Decimal("0")
@@ -67,9 +71,15 @@ class Command(BaseCommand):
         parser.add_argument(
             "--method",
             type=str,
-            default="best",
-            choices=["ledger", "unwind", "best"],
-            help="ledger=faqat jurnal; unwind=sotuvlarni qaytarish; best=hammasi",
+            default="unwind",
+            choices=["ledger", "unwind", "flow", "best"],
+            help="unwind=14:40 ga qaytarish; flow=hozirgacha jurnal; best=ledger yoki unwind",
+        )
+        parser.add_argument(
+            "--min-flow",
+            type=Decimal,
+            default=None,
+            help="unwind: faqat anchor dan keyin harakat bo'lgan mahsulotlar (masalan 0.001)",
         )
         parser.add_argument("--dry-run", action="store_true")
         parser.add_argument("--limit", type=int, default=0)
@@ -79,6 +89,7 @@ class Command(BaseCommand):
         method = options["method"]
         dry = options["dry_run"]
         limit = options["limit"]
+        min_flow = options.get("min_flow")
 
         tenant = Tenant.objects.filter(server_name__iexact=options["tenant"].strip()).first()
         if not tenant:
@@ -97,16 +108,19 @@ class Command(BaseCommand):
         sold = self._flow_map(SaleItem, Sale, "sale", at, pids)
         received = self._flow_map(StockReceiptItem, StockReceipt, "receipt", at, pids)
         returned = self._flow_map(SaleReturnItem, SaleReturn, "return", at, pids)
-        audits = self._audit_map_before(at, pids)
 
-        stats = {"ledger": 0, "audit": 0, "unwind": 0, "unchanged": 0}
+        stats: dict[str, int] = defaultdict(int)
         updates: list[tuple[Product, Decimal, Decimal, str]] = []
 
         for product in products:
-            target, source = self._resolve(
-                product, method, at, ledger, sold, received, returned, audits
-            )
-            stats[source] = stats.get(source, 0) + 1
+            pid = product.id
+            flow_qty = sold.get(pid, ZERO) + received.get(pid, ZERO) + returned.get(pid, ZERO)
+            if min_flow is not None and method == "unwind" and flow_qty < min_flow:
+                stats["skip"] += 1
+                continue
+
+            target, source = self._resolve(product, method, at, ledger, sold, received, returned)
+            stats[source] += 1
             if product.quantity == target:
                 stats["unchanged"] += 1
                 continue
@@ -117,8 +131,8 @@ class Command(BaseCommand):
             updates = updates[:limit]
 
         self.stdout.write(
-            f"Manba: jurnal={stats.get('ledger',0)} reviziya={stats.get('audit',0)} "
-            f"unwind={stats.get('unwind',0)} | o'zgarmaydi={stats.get('unchanged',0)}"
+            f"Manba: jurnal={stats['ledger']} unwind={stats['unwind']} flow={stats['flow']} "
+            f"skip={stats['skip']} | o'zgarmaydi={stats['unchanged']}"
         )
         self.stdout.write(f"Yangilanadi: {len(updates)} ta" + (" (dry-run)" if dry else ""))
 
@@ -140,24 +154,23 @@ class Command(BaseCommand):
         if not dry:
             self.stdout.write("POS: Sinxron bosing.")
 
-    def _resolve(self, product, method, at, ledger, sold, received, returned, audits):
+    def _resolve(self, product, method, at, ledger, sold, received, returned):
         pid = product.id
         cur = product.quantity or ZERO
         unwind = cur + sold.get(pid, ZERO) - received.get(pid, ZERO) + returned.get(pid, ZERO)
         led = ledger.get(pid, ZERO)
+        flow = led + received.get(pid, ZERO) + returned.get(pid, ZERO) - sold.get(pid, ZERO)
 
         if method == "ledger":
             return led, "ledger"
         if method == "unwind":
             return unwind, "unwind"
+        if method == "flow":
+            return flow, "flow"
 
-        # best
-        if _has_movement_before(pid, at) and led != ZERO:
-            return led, "ledger"
+        # best: anchor gacha jurnal bor bo'lsa ledger@anchor, aks holda unwind
         if _has_movement_before(pid, at):
             return led, "ledger"
-        if pid in audits:
-            return audits[pid], "audit"
         return unwind, "unwind"
 
     def _apply(self, product, qty: Decimal):
@@ -166,21 +179,6 @@ class Command(BaseCommand):
         else:
             product.quantity = qty
             product.save(update_fields=["quantity", "updated_at"])
-
-    def _audit_map_before(self, at, pids) -> dict:
-        out: dict = {}
-        for row in (
-            StockAuditItem.objects.filter(
-                product_id__in=pids,
-                audit__completed_at__lte=at,
-                quantity_after__isnull=False,
-            )
-            .select_related("audit")
-            .order_by("product_id", "-audit__completed_at")
-        ):
-            if row.product_id not in out:
-                out[row.product_id] = Decimal(str(row.quantity_after))
-        return out
 
     def _parent_ids_since(self, model, at):
         return model.objects.filter(

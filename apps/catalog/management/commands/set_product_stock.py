@@ -108,9 +108,13 @@ class Command(BaseCommand):
                     continue
                 if len(line) < 2:
                     continue
-                if line[0].lower() in ("name", "nomi", "mahsulot", "barcode"):
+                if line[0].lower() in ("name", "nomi", "mahsulot", "barcode", "hozirgi_qoldiq"):
                     continue
-                if len(line) >= 3:
+                if len(line) >= 4:
+                    name, barcode, _old, qty_s = line[0], line[1], line[2], line[3]
+                    if not (qty_s or "").strip():
+                        continue
+                elif len(line) >= 3:
                     name, barcode, qty_s = line[0], line[1], line[2]
                 else:
                     name, barcode, qty_s = line[0], "", line[1]
