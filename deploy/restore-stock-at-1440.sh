@@ -9,8 +9,8 @@ TENANT="${TENANT:-kuloloptom}"
 PY="./venv/bin/python"
 
 if [[ "${1:-}" == "--apply" ]]; then
-  echo "==> Barcha qoldiq qaytarilmoqda: $AT ($TENANT)"
-  sudo -u tezpos $PY manage.py restore_all_stock_at --at "$AT" --tenant "$TENANT"
+  echo "==> Barcha qoldiq qaytarilmoqda: $AT ($TENANT) method=best"
+  sudo -u tezpos $PY manage.py restore_all_stock_at --at "$AT" --tenant "$TENANT" --method best
   echo ""
   echo "TAYYOR. POS da Sinxron bosing."
   exit 0
