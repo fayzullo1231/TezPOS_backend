@@ -291,7 +291,10 @@ class SaleViewSet(viewsets.ModelViewSet):
         return SaleSerializer
 
     def get_serializer_context(self):
-        return {"request": self.request}
+        ctx = {"request": self.request}
+        if self.action == "create":
+            ctx["allow_negative_stock"] = True
+        return ctx
 
     def perform_create(self, serializer):
         shift = (
