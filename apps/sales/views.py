@@ -278,7 +278,9 @@ class SaleViewSet(viewsets.ModelViewSet):
         if self.action == "list":
             qs = qs.annotate(items_count=Count("items"))
 
-        return qs.filter(status=Sale.STATUS_COMPLETED)
+        return qs.filter(status=Sale.STATUS_COMPLETED).order_by(
+            "-receipt_number", "-created_at"
+        )
 
     def paginate_queryset(self, queryset):
         if self.action == "list" and self.request.query_params.get("all") == "true":
