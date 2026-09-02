@@ -16,6 +16,7 @@ try:
     cur = c.cursor()
     sales = "?"
     neg = "?"
+    tannarx = "?"
     for tbl in ("sales_sale",):
         try:
             cur.execute(f"SELECT COUNT(*) FROM {tbl} WHERE status='completed'")
@@ -30,22 +31,33 @@ try:
             break
         except sqlite3.OperationalError:
             pass
-    print(f"{sales}|{neg}")
+    for tbl in ("catalog_product", "products_product"):
+        try:
+            cur.execute(
+                f"SELECT SUM(CAST(quantity AS REAL)*CAST(cost_price AS REAL)) "
+                f"FROM {tbl} WHERE is_active=1 OR is_active IS NULL"
+            )
+            v = cur.fetchone()[0]
+            tannarx = str(int(v or 0))
+            break
+        except sqlite3.OperationalError:
+            pass
+    print(f"{sales}|{neg}|{tannarx}")
     c.close()
 except Exception:
-    print("?|?")
+    print("?|?|?")
 PY
   elif command -v sqlite3 >/dev/null 2>&1; then
     local sales neg
     sales=$(sqlite3 "$f" "SELECT COUNT(*) FROM sales_sale WHERE status='completed'" 2>/dev/null || echo "?")
     neg=$(sqlite3 "$f" "SELECT COUNT(*) FROM catalog_product WHERE CAST(quantity AS REAL) < 0" 2>/dev/null || echo "?")
-    echo "${sales}|${neg}"
+    echo "${sales}|${neg}|?"
   else
-    echo "?|?"
+    echo "?|?|?"
   fi
 }
 
-echo "=== tezpos.db zaxiralari (sotuvlar | minus | hajm | sana | yo'l) ==="
+echo "=== tezpos.db zaxiralari (sotuv | minus | tannarx | hajm | sana | yo'l) ==="
 echo ""
 
 declare -A seen=()
@@ -56,8 +68,8 @@ while IFS= read -r -d '' f; do
 
   size=$(du -h "$f" 2>/dev/null | awk '{print $1}')
   mtime=$(stat -c '%y' "$f" 2>/dev/null | cut -d. -f1 || echo "?")
-  IFS='|' read -r sales neg < <(db_stats "$f")
-  printf "%6s sotuv | %4s minus | %6s | %s | %s\n" "$sales" "$neg" "$size" "$mtime" "$f"
+  IFS='|' read -r sales neg tannarx < <(db_stats "$f")
+  printf "%6s sotuv | %4s minus | %12s so'm | %6s | %s | %s\n" "$sales" "$neg" "$tannarx" "$size" "$mtime" "$f"
 done < <(
   find /opt/tezpos-backend/data /opt/tezpos-backend /root /var/backups /home -name 'tezpos.db*' -type f -print0 2>/dev/null \
     | sort -z -u
@@ -76,5 +88,10 @@ print('  Mahsulotlar:', Product.objects.filter(is_active=True).count())
 fi
 
 echo ""
-echo "To'liq tiklash:"
-echo "  sudo bash deploy/restore-sqlite-db.sh /yo'l/eski/tezpos.db"
+echo "Sep 2 eng yuqori qoldiq:"
+echo "  sudo bash deploy/restore-sep2-peak.sh"
+echo "  sudo bash deploy/restore-sep2-peak.sh --apply"
+echo ""
+echo "Contabo Sep 2 12:43 (1.7 mlrd):"
+echo "  sudo bash deploy/prepare-contabo-sep2.sh"
+echo "  -> Contabo Restore -> sudo bash deploy/finish-contabo-sep2.sh --apply"
