@@ -196,19 +196,30 @@ class PublicCheckJsonView(View):
         balance = payment.balance_after
         if balance is None and payment.customer_id:
             balance = payment.customer.debt
+        is_add = str(payment.note or "").startswith("[qarz+]")
+        if is_add:
+            title = f"Qarz № {payment.receipt_number} — {store}"
+            subtitle = f"Qarz qo'shildi № {payment.receipt_number}"
+            turi = "Qarz qo'shish"
+            debt_amt = _fmt_money(paid)
+        else:
+            title = f"To'lov № {payment.receipt_number} — {store}"
+            subtitle = f"Qarz to'lovi № {payment.receipt_number}"
+            turi = "Qarz to'lovi"
+            debt_amt = _fmt_money(-paid)
         return {
             "ok": True,
-            "title": f"To'lov № {payment.receipt_number} — {store}",
+            "title": title,
             "store_name": store,
-            "subtitle": f"Qarz to'lovi № {payment.receipt_number}",
+            "subtitle": subtitle,
             "kind": "payment",
             "meta_rows": [
                 {"label": "Sana", "value": when_s},
                 {"label": "Mijoz", "value": customer},
-                {"label": "Turi", "value": "Qarz to'lovi"},
+                {"label": "Turi", "value": turi},
             ],
-            "debt_amount": _fmt_money(-paid),
-            "debt_balance": _fmt_money(balance),
+            "debt_amount": debt_amt,
+            "debt_balance": _fmt_money(abs(balance or 0)),
         }
 
     def _sale_payload(self, store, sale: Sale) -> dict:
@@ -242,9 +253,10 @@ class PublicCheckJsonView(View):
         ]
 
         show_debt = sale.payment_type == Sale.PAYMENT_CREDIT or (sale.debt_amount or 0) > 0
-        debt_balance = "—"
         if show_debt and sale.customer_id and sale.customer:
-            debt_balance = _fmt_money(sale.customer.debt)
+            debt_balance = _fmt_money(abs(sale.customer.debt or 0))
+        else:
+            debt_balance = "—"
 
         return {
             "ok": True,

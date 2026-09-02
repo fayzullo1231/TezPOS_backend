@@ -100,6 +100,12 @@ class Sale(models.Model):
     paid_amount = models.DecimalField(max_digits=14, decimal_places=2, default=0)
     debt_amount = models.DecimalField(max_digits=14, decimal_places=2, default=0)
     comment = models.TextField(blank=True)
+    price_list_id = models.CharField(
+        max_length=64,
+        blank=True,
+        default="",
+        help_text="Bo'sh = Sotuv narxi; UUID = optom/boshqa ro'yxat",
+    )
     receipt_number = models.PositiveIntegerField(default=0)
     created_at = models.DateTimeField(auto_now_add=True)
     completed_at = models.DateTimeField(null=True, blank=True)

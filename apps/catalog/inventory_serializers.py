@@ -348,6 +348,10 @@ class StockAuditCreateSerializer(serializers.Serializer):
                         defaults={"price": Decimal(price_str)},
                     )
 
+            product_ids = [row["product_id"] for row in items_data]
+            products = Product.objects.filter(tenant=tenant, id__in=product_ids)
+            audit._stock_updates = stock_snapshot(products)
+
         return audit
 
 
@@ -368,6 +372,7 @@ class StockAuditItemReadSerializer(serializers.ModelSerializer):
 
 class StockAuditReadSerializer(serializers.ModelSerializer):
     items = StockAuditItemReadSerializer(many=True, read_only=True)
+    stock_updates = serializers.SerializerMethodField()
 
     class Meta:
         model = StockAudit
@@ -384,4 +389,8 @@ class StockAuditReadSerializer(serializers.ModelSerializer):
             "created_at",
             "completed_at",
             "items",
+            "stock_updates",
         ]
+
+    def get_stock_updates(self, obj):
+        return getattr(obj, "_stock_updates", [])

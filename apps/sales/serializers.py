@@ -98,6 +98,7 @@ class SaleSerializer(serializers.ModelSerializer):
             "paid_amount",
             "debt_amount",
             "comment",
+            "price_list_id",
             "receipt_number",
             "items",
             "created_at",
@@ -312,7 +313,7 @@ class SaleSerializer(serializers.ModelSerializer):
 
 
 class SaleListSerializer(serializers.ModelSerializer):
-    items_count = serializers.IntegerField(source="items.count", read_only=True)
+    items_count = serializers.IntegerField(read_only=True)
 
     class Meta:
         model = Sale
@@ -358,6 +359,9 @@ class SyncSaleSerializer(serializers.Serializer):
         max_digits=14, decimal_places=2, default=0
     )
     comment = serializers.CharField(required=False, allow_blank=True, default="")
+    price_list_id = serializers.CharField(
+        required=False, allow_blank=True, default="", max_length=64
+    )
     status = serializers.ChoiceField(choices=Sale.STATUS_CHOICES, default="completed")
     created_at = serializers.DateTimeField(required=False)
     items = SaleItemSerializer(many=True)

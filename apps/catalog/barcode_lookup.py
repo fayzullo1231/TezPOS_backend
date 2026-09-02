@@ -14,9 +14,11 @@ def find_product_by_barcode(tenant, code: str) -> Product | None:
     if not code:
         return None
 
-    base_qs = Product.objects.filter(tenant=tenant, is_active=True).select_related(
-        "category", "unit_ref", "supplier"
-    ).prefetch_related("barcodes")
+    base_qs = (
+        Product.objects.filter(tenant=tenant, is_active=True)
+        .select_related("category", "unit_ref", "supplier", "brand")
+        .prefetch_related("barcodes", "list_prices__price_list", "images")
+    )
 
     product = base_qs.filter(barcode=code).first()
     if product:

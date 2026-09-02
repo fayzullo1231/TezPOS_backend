@@ -111,6 +111,7 @@ class CustomerViewSet(viewsets.ModelViewSet):
                 "balance": str(balance),
                 "balance_before": str(current),
                 "payment_type": payment.payment_type,
+                "kind": "sub",
                 "check_path": f"/check/{tenant.server_name}/{payment.id}/",
                 "check_url": f"{os.getenv('PUBLIC_CHECK_SITE_BASE', 'https://tez-pos.uz').rstrip('/')}/check/{tenant.server_name}/{payment.id}/",
                 "customer": {
@@ -120,6 +121,113 @@ class CustomerViewSet(viewsets.ModelViewSet):
                     "debt": str(balance),
                 },
                 "created_at": payment.created_at.isoformat() if payment.created_at else None,
+            }
+        )
+
+    @action(detail=True, methods=["post"], url_path="adjust-debt")
+    def adjust_debt(self, request, pk=None):
+        """Qarz qo'shish (add) yoki ayirish (sub) — saytdagi Mijoz qarzlari / SMS kabi."""
+        tenant = request.user.tenant
+        kind = str(request.data.get("kind") or "add").strip().lower()
+        if kind not in ("add", "sub"):
+            return Response(
+                {"detail": "Amal noto'g'ri (add|sub)."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        try:
+            amount = Decimal(
+                str(request.data.get("amount", "0")).replace(" ", "").replace(",", ".")
+            )
+        except Exception:
+            return Response(
+                {"detail": "Summa noto'g'ri."}, status=status.HTTP_400_BAD_REQUEST
+            )
+        if amount <= 0:
+            return Response(
+                {"detail": "Summa 0 dan katta bo'lishi kerak."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        payment_type = (request.data.get("payment_type") or "cash").strip().lower()
+        if payment_type not in ("cash", "card"):
+            payment_type = "cash"
+        note = str(request.data.get("note") or "").strip()[:255]
+
+        with transaction.atomic():
+            customer = (
+                Customer.objects.select_for_update()
+                .filter(pk=pk, tenant=tenant)
+                .first()
+            )
+            if not customer:
+                return Response(
+                    {"detail": "Mijoz topilmadi."}, status=status.HTTP_404_NOT_FOUND
+                )
+
+            current = customer.debt or Decimal("0")
+            if kind == "sub":
+                if current <= 0:
+                    return Response(
+                        {"detail": "Bu mijozda qarz qoldig'i yo'q."},
+                        status=status.HTTP_400_BAD_REQUEST,
+                    )
+                paid = min(amount, current)
+                balance = apply_customer_debt_delta(customer, -paid)
+                delta = -paid
+                store_amount = paid
+                note_out = note or "Qarz to'lovi"
+            else:
+                balance = apply_customer_debt_delta(customer, amount)
+                delta = amount
+                store_amount = amount
+                note_out = (note or "Qarz qo'shildi").strip()
+                if not note_out.startswith("[qarz+]"):
+                    note_out = f"[qarz+] {note_out}"[:255]
+
+            last = (
+                CustomerDebtPayment.objects.filter(tenant=tenant)
+                .order_by("-receipt_number")
+                .values_list("receipt_number", flat=True)
+                .first()
+            )
+            receipt_number = (last or 0) + 1
+            payment = CustomerDebtPayment.objects.create(
+                tenant=tenant,
+                customer=customer,
+                user=request.user,
+                amount=store_amount,
+                payment_type=payment_type,
+                note=note_out,
+                receipt_number=receipt_number,
+                balance_after=balance,
+            )
+
+        check_base = os.getenv("PUBLIC_CHECK_SITE_BASE", "https://tez-pos.uz").rstrip(
+            "/"
+        )
+        return Response(
+            {
+                "id": str(payment.id),
+                "receipt_number": payment.receipt_number,
+                "paid": str(store_amount if kind == "sub" else 0),
+                "amount": str(store_amount),
+                "debt_delta": str(delta),
+                "balance": str(balance),
+                "balance_before": str(current),
+                "payment_type": payment.payment_type,
+                "kind": kind,
+                "note": note_out,
+                "check_path": f"/check/{tenant.server_name}/{payment.id}/",
+                "check_url": f"{check_base}/check/{tenant.server_name}/{payment.id}/",
+                "customer": {
+                    "id": str(customer.id),
+                    "name": customer.name,
+                    "phone": customer.phone or "",
+                    "debt": str(balance),
+                },
+                "created_at": payment.created_at.isoformat()
+                if payment.created_at
+                else None,
             }
         )
 
@@ -166,6 +274,9 @@ class SaleViewSet(viewsets.ModelViewSet):
             qs = qs.exclude(synced_at__isnull=True)
         elif synced == "false":
             qs = qs.filter(synced_at__isnull=True)
+
+        if self.action == "list":
+            qs = qs.annotate(items_count=Count("items"))
 
         return qs.filter(status=Sale.STATUS_COMPLETED)
 
