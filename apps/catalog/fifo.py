@@ -247,8 +247,10 @@ def consume_fifo(
         remaining -= take
 
     if remaining > ZERO and allow_negative:
-        # Faqat favqulodda — yangi manfiy partiya yaratilmaydi; product sync 0 ga tushadi
-        pass
+        product = Product.objects.select_for_update().get(pk=product.pk)
+        product.quantity = batch_remaining_sum(product) - remaining
+        product.save(update_fields=["quantity", "updated_at"])
+        return allocations
 
     sync_product_quantity(product)
     return allocations
