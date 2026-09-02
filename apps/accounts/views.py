@@ -268,7 +268,12 @@ class ShiftHistoryView(APIView):
                 orphan.closed_at = timezone.now()
             orphan.save(update_fields=["status", "closed_at"])
 
-        qs = Shift.objects.filter(tenant=tenant, user=user).select_related("user")
+        show_all = request.query_params.get("all") == "true"
+        is_admin = user.role in ("super_admin", "admin") or user.is_superuser
+        if show_all and is_admin:
+            qs = Shift.objects.filter(tenant=tenant).select_related("user")
+        else:
+            qs = Shift.objects.filter(tenant=tenant, user=user).select_related("user")
 
         date_from = request.query_params.get("date_from")
         date_to = request.query_params.get("date_to")
