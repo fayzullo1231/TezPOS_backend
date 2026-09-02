@@ -19,7 +19,7 @@ from decimal import Decimal
 
 from django.core.management.base import BaseCommand, CommandError
 from django.db import transaction
-from django.db.models import Sum
+from django.db.models import Q, Sum
 from django.utils import timezone
 
 from apps.catalog.fifo import batch_remaining_sum, sync_product_quantity
@@ -140,11 +140,9 @@ class Command(BaseCommand):
         return timezone.make_aware(dt, tz) if timezone.is_naive(dt) else dt
 
     def _sale_since_filter(self, since):
-        return (
-            Sale.objects.filter(status=Sale.STATUS_COMPLETED)
-            .filter(completed_at__gte=since)
-            | Sale.objects.filter(status=Sale.STATUS_COMPLETED, completed_at__isnull=True)
-            .filter(created_at__gte=since)
+        return Sale.objects.filter(status=Sale.STATUS_COMPLETED).filter(
+            Q(completed_at__gte=since)
+            | Q(completed_at__isnull=True, created_at__gte=since)
         )
 
     def _sum_since(self, qs, field: str, since):
