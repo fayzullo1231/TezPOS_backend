@@ -103,15 +103,51 @@ class Command(BaseCommand):
             raise CommandError(f"CSV topilmadi: {p}")
         rows = []
         with p.open(newline="", encoding="utf-8-sig") as f:
-            for line in csv.reader(f):
+            reader = csv.reader(f)
+            header: list[str] | None = None
+            qty_idx: int | None = None
+            name_idx = 0
+            barcode_idx = 1
+
+            for line in reader:
                 if not line or all(not (c or "").strip() for c in line):
                     continue
                 if len(line) < 2:
                     continue
-                if line[0].lower() in ("name", "nomi", "mahsulot", "barcode", "hozirgi_qoldiq"):
+
+                if header is None and line[0].lower() in (
+                    "name",
+                    "nomi",
+                    "mahsulot",
+                    "barcode",
+                    "hozirgi_qoldiq",
+                    "product_id",
+                ):
+                    header = [c.strip().lower() for c in line]
+                    if "nomi" in header:
+                        name_idx = header.index("nomi")
+                    elif "name" in header:
+                        name_idx = header.index("name")
+                    if "barcode" in header:
+                        barcode_idx = header.index("barcode")
+                    for key in ("tanlangan", "yangi_qoldiq", "miqdor", "qty", "quantity"):
+                        if key in header:
+                            qty_idx = header.index(key)
+                            break
                     continue
+
+                if qty_idx is not None and len(line) > qty_idx:
+                    qty_s = (line[qty_idx] or "").strip()
+                    if not qty_s:
+                        continue
+                    name = line[name_idx] if len(line) > name_idx else ""
+                    barcode = line[barcode_idx] if len(line) > barcode_idx else ""
+                    rows.append((name.strip(), barcode.strip(), self._parse_qty(qty_s)))
+                    continue
+
+                # Eski formatlar
                 if len(line) >= 4:
-                    name, barcode, _old, qty_s = line[0], line[1], line[2], line[3]
+                    name, barcode, _extra, qty_s = line[0], line[1], line[2], line[3]
                     if not (qty_s or "").strip():
                         continue
                 elif len(line) >= 3:
