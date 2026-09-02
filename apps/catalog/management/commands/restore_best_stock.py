@@ -71,18 +71,19 @@ def _backup_stats(tenant, path: Path, products) -> tuple[Decimal, Decimal, dict]
 
 def _find_backup_files() -> list[Path]:
     roots = [Path("/root"), Path("/opt/tezpos-backend/data")]
+    patterns = ["tezpos*.db", "tezpos.db.before-restore.*"]
     found: list[Path] = []
     for root in roots:
         if not root.is_dir():
             continue
-        for p in sorted(root.glob("tezpos*.db")):
-            if p.name.endswith("-shm") or p.name.endswith("-wal"):
-                continue
-            if p.is_file() and p.stat().st_size > 100_000:
-                found.append(p.resolve())
-    # unique
-    seen = set()
-    out = []
+        for pat in patterns:
+            for p in sorted(root.glob(pat)):
+                if "-shm" in p.name or "-wal" in p.name:
+                    continue
+                if p.is_file() and p.stat().st_size > 100_000:
+                    found.append(p.resolve())
+    seen: set[Path] = set()
+    out: list[Path] = []
     for p in found:
         if p not in seen:
             seen.add(p)
@@ -97,9 +98,9 @@ class Command(BaseCommand):
         parser.add_argument("--tenant", type=str, default="kuloloptom")
         parser.add_argument(
             "--strategy",
-            choices=["best-file", "max-qty"],
-            default="max-qty",
-            help="best-file=eng yuqori fayl; max-qty=har mahsulotda max",
+            choices=["auto", "best-file", "max-qty"],
+            default="auto",
+            help="auto=eng yaxshisi; best-file=eng yuqori fayl; max-qty=har mahsulotda max",
         )
         parser.add_argument("--dry-run", action="store_true")
 
@@ -139,6 +140,14 @@ class Command(BaseCommand):
         )
 
         strategy = options["strategy"]
+        if strategy == "auto":
+            if best[1] is not None and best[2] > live_cost * Decimal("1.02"):
+                strategy = "best-file"
+                self.stdout.write("Auto: best-file (zaxira aniq yuqori)")
+            else:
+                strategy = "max-qty"
+                self.stdout.write("Auto: max-qty (har mahsulotda max)")
+
         dry = options["dry_run"]
 
         if strategy == "best-file":
