@@ -1,35 +1,30 @@
 """
-Mahsulot qoldig'ini ombor harakatlari (StockMovement) jurnalidan qayta hisoblash.
+Qoldiqni anchor vaqtdan (masalan 14:40) hozirgacha qayta hisoblash.
 
-Noto'g'ri skriptlar product.quantity ni to'g'ridan o'zgartirgan bo'lsa, jurnal aniqroq
-bo'lishi mumkin. 100% kafolat uchun oxirida reviziya (fizik sanash) tavsiya etiladi.
+Formula har mahsulot uchun:
+  qoldiq = jurnal(anchor gacha) + kirim(keyin) + qaytarish(keyin) - sotuv(keyin)
 
 Ishlatish:
-  python manage.py recalc_stock_from_ledger --dry-run
-  python manage.py recalc_stock_from_ledger
-
-  # 14:40 gacha jurnal + keyingi harakatlar (tekshirish):
   python manage.py recalc_stock_from_ledger --anchor "2026-09-02 14:40" --dry-run
+  python manage.py recalc_stock_from_ledger --anchor "2026-09-02 14:40"
 """
 
 from __future__ import annotations
 
+from collections import defaultdict
 from datetime import datetime
 from decimal import Decimal
 
 from django.core.management.base import BaseCommand, CommandError
 from django.db import transaction
-from django.db.models import Sum
+from django.db.models import Q, Sum
 from django.utils import timezone
 
 from apps.catalog.models import Product, StockMovement, StockReceipt, StockReceiptItem
 from apps.sales.models import Sale, SaleItem, SaleReturn, SaleReturnItem
 
 ZERO = Decimal("0")
-OUT_TYPES = {
-    StockMovement.TYPE_SALE,
-    StockMovement.TYPE_RETURN_CANCEL,
-}
+OUT_TYPES = {StockMovement.TYPE_SALE, StockMovement.TYPE_RETURN_CANCEL}
 IN_TYPES = {
     StockMovement.TYPE_OPENING,
     StockMovement.TYPE_RECEIPT,
@@ -40,7 +35,7 @@ IN_TYPES = {
 }
 
 
-def _movement_delta(movement_type: str, qty: Decimal) -> Decimal:
+def _delta(movement_type: str, qty: Decimal) -> Decimal:
     if movement_type in OUT_TYPES:
         return -qty
     if movement_type in IN_TYPES:
@@ -49,65 +44,93 @@ def _movement_delta(movement_type: str, qty: Decimal) -> Decimal:
 
 
 class Command(BaseCommand):
-    help = "StockMovement jurnalidan qoldiqni qayta hisoblash"
+    help = "Anchor vaqtdan hozirgacha qoldiqni qayta hisoblash"
 
     def add_arguments(self, parser):
         parser.add_argument("--dry-run", action="store_true")
         parser.add_argument(
             "--anchor",
             type=str,
-            default="",
-            help="Ma'lum vaqt (YYYY-MM-DD HH:MM) — shu paytgacha/ keyin tekshirish",
+            default="2026-09-02 14:40",
+            help="To'g'ri qoldiq vaqti (Asia/Tashkent). Default: 2026-09-02 14:40",
         )
         parser.add_argument("--limit", type=int, default=0)
+        parser.add_argument(
+            "--only-changed",
+            action="store_true",
+            help="Faqat o'zgargan mahsulotlarni ko'rsatish",
+        )
 
     def handle(self, *args, **options):
         dry = options["dry_run"]
         limit = options["limit"]
-        anchor = self._parse_anchor(options["anchor"]) if options["anchor"] else None
+        only_changed = options["only_changed"]
+        anchor = self._parse_anchor(options["anchor"])
+        now = timezone.now()
 
-        if anchor:
-            self.stdout.write(f"Anchor: {anchor} (jurnal bo'yicha baseline)")
+        self.stdout.write(
+            f"Anchor: {anchor:%Y-%m-%d %H:%M} ({timezone.get_current_timezone()})"
+        )
+        self.stdout.write(f"Hozir: {now:%Y-%m-%d %H:%M}")
 
-        updates: list[tuple[Product, Decimal, Decimal, str]] = []
+        baseline = self._ledger_map(until=anchor)
+        sold = self._sum_map(SaleItem, Sale.STATUS_COMPLETED, "sale", since=anchor)
+        returned = self._sum_map(
+            SaleReturnItem, SaleReturn.STATUS_COMPLETED, "return", since=anchor
+        )
+        received = self._sum_map(
+            StockReceiptItem, StockReceipt.STATUS_COMPLETED, "receipt", since=anchor
+        )
 
-        for product in Product.objects.filter(is_active=True).iterator(chunk_size=200):
-            target, note = self._target_qty(product, anchor)
+        updates: list[tuple[Product, Decimal, Decimal]] = []
+        all_ids = set(baseline) | set(sold) | set(returned) | set(received)
+
+        for product in Product.objects.filter(is_active=True).iterator(chunk_size=300):
+            pid = product.id
+            if pid not in all_ids and product.quantity == ZERO:
+                continue
+            base = baseline.get(pid, ZERO)
+            flow = received.get(pid, ZERO) + returned.get(pid, ZERO) - sold.get(pid, ZERO)
+            target = base + flow
             if product.quantity == target:
                 continue
-            updates.append((product, product.quantity, target, note))
+            updates.append((product, product.quantity, target))
 
         updates.sort(key=lambda x: abs(x[2] - x[1]), reverse=True)
         if limit > 0:
             updates = updates[:limit]
 
-        self.stdout.write(f"O'zgaradi: {len(updates)} ta" + (" (dry-run)" if dry else ""))
+        self.stdout.write(f"Yangilanadi: {len(updates)} ta mahsulot" + (" (dry-run)" if dry else ""))
 
+        shown = 0
         changed = 0
         with transaction.atomic():
-            for product, old, new, note in updates:
-                self.stdout.write(
-                    f"{'[dry] ' if dry else ''}{product.name[:50]}: {old} -> {new} ({note})"
-                )
+            for product, old, new in updates:
+                if only_changed and old == new:
+                    continue
+                if shown < 50 or not only_changed:
+                    self.stdout.write(
+                        f"{'[dry] ' if dry else ''}{product.name[:52]}: {old} -> {new}"
+                    )
+                shown += 1
                 if not dry:
                     product.quantity = new
                     product.save(update_fields=["quantity", "updated_at"])
                 changed += 1
 
+        if only_changed and shown > 50:
+            self.stdout.write(f"... va yana {shown - 50} ta")
+
         self.stdout.write(
             self.style.SUCCESS(
-                f"Tayyor: {changed} ta yangilandi"
-                + (" (dry-run)" if dry else "")
+                f"Tayyor: {changed} ta yangilandi" + (" (dry-run)" if dry else "")
             )
         )
-        if not dry and changed:
-            self.stdout.write("POS: Sinxron tugmasini bosing.")
-        self.stdout.write(
-            "\n100% aniq qoldiq uchun: POS da Inventar → Reviziya (fizik sanash)."
-        )
+        if not dry:
+            self.stdout.write("POS da Sinxron tugmasini bosing.")
 
     def _parse_anchor(self, raw: str):
-        raw = raw.strip()
+        raw = (raw or "").strip()
         for fmt in ("%Y-%m-%d %H:%M", "%Y-%m-%d %H:%M:%S", "%Y-%m-%d"):
             try:
                 dt = datetime.strptime(raw, fmt)
@@ -115,64 +138,56 @@ class Command(BaseCommand):
                 return timezone.make_aware(dt, tz) if timezone.is_naive(dt) else dt
             except ValueError:
                 continue
-        raise CommandError("Anchor format: YYYY-MM-DD HH:MM")
+        raise CommandError("Anchor: YYYY-MM-DD HH:MM")
 
-    def _ledger_net(self, product_id, until=None, since=None) -> Decimal:
-        qs = StockMovement.objects.filter(product_id=product_id)
+    def _ledger_map(self, until=None, since=None) -> dict:
+        qs = StockMovement.objects.all()
         if until is not None:
             qs = qs.filter(created_at__lte=until)
         if since is not None:
             qs = qs.filter(created_at__gt=since)
-        net = ZERO
-        for row in qs.values("movement_type", "quantity"):
-            net += _movement_delta(row["movement_type"], Decimal(str(row["quantity"] or 0)))
-        return net
+        net: dict = defaultdict(lambda: ZERO)
+        for row in qs.values("product_id", "movement_type", "quantity"):
+            net[row["product_id"]] += _delta(
+                row["movement_type"], Decimal(str(row["quantity"] or 0))
+            )
+        return dict(net)
 
-    def _sales_net(self, product_id, since=None, until=None) -> Decimal:
-        qs = SaleItem.objects.filter(
-            product_id=product_id,
-            sale__status=Sale.STATUS_COMPLETED,
-        )
-        if since:
-            qs = qs.filter(
-                sale__completed_at__gte=since,
-            ) | qs.filter(sale__completed_at__isnull=True, sale__created_at__gte=since)
-        if until:
-            qs = qs.filter(
-                sale__completed_at__lte=until,
-            ) | qs.filter(sale__completed_at__isnull=True, sale__created_at__lte=until)
-        sold = qs.aggregate(t=Sum("quantity"))["t"] or ZERO
-        rqs = SaleReturnItem.objects.filter(
-            product_id=product_id,
-            sale_return__status=SaleReturn.STATUS_COMPLETED,
-        )
-        if since:
-            rqs = rqs.filter(sale_return__completed_at__gte=since)
-        if until:
-            rqs = rqs.filter(sale_return__completed_at__lte=until)
-        returned = rqs.aggregate(t=Sum("quantity"))["t"] or ZERO
-        recv_qs = StockReceiptItem.objects.filter(
-            product_id=product_id,
-            receipt__status=StockReceipt.STATUS_COMPLETED,
-        )
-        if since:
-            recv_qs = recv_qs.filter(receipt__completed_at__gte=since)
-        if until:
-            recv_qs = recv_qs.filter(receipt__completed_at__lte=until)
-        received = recv_qs.aggregate(t=Sum("quantity"))["t"] or ZERO
-        return received + returned - sold
+    def _sale_ids_since(self, since):
+        return Sale.objects.filter(status=Sale.STATUS_COMPLETED).filter(
+            Q(completed_at__gt=since)
+            | Q(completed_at__isnull=True, created_at__gt=since)
+        ).values_list("id", flat=True)
 
-    def _target_qty(self, product: Product, anchor):
-        full_ledger = self._ledger_net(product.id)
-        if not anchor:
-            return full_ledger, "jurnal"
+    def _return_ids_since(self, since):
+        return SaleReturn.objects.filter(status=SaleReturn.STATUS_COMPLETED).filter(
+            Q(completed_at__gt=since)
+            | Q(completed_at__isnull=True, created_at__gt=since)
+        ).values_list("id", flat=True)
 
-        before = self._ledger_net(product.id, until=anchor)
-        after = self._ledger_net(product.id, since=anchor)
-        # Tekshirish: anchor dan keyin sotuv/kirim
-        flow_after = self._sales_net(product.id, since=anchor)
-        target = before + after
-        note = f"anchor {anchor:%H:%M} jurnal"
-        if after != flow_after and abs(after - flow_after) > Decimal("0.001"):
-            note += f" (sotuv/kirim farq {flow_after})"
-        return target, note
+    def _receipt_ids_since(self, since):
+        return StockReceipt.objects.filter(status=StockReceipt.STATUS_COMPLETED).filter(
+            Q(completed_at__gt=since)
+            | Q(completed_at__isnull=True, created_at__gt=since)
+        ).values_list("id", flat=True)
+
+    def _sum_map(self, item_model, parent_status, kind: str, since) -> dict:
+        if kind == "sale":
+            parent_ids = list(self._sale_ids_since(since))
+            fk = "sale_id"
+        elif kind == "return":
+            parent_ids = list(self._return_ids_since(since))
+            fk = "sale_return_id"
+        else:
+            parent_ids = list(self._receipt_ids_since(since))
+            fk = "receipt_id"
+
+        if not parent_ids:
+            return {}
+
+        return {
+            row["product_id"]: row["t"] or ZERO
+            for row in item_model.objects.filter(**{f"{fk}__in": parent_ids})
+            .values("product_id")
+            .annotate(t=Sum("quantity"))
+        }
