@@ -28,6 +28,10 @@ def _dec(v) -> Decimal:
         return ZERO
 
 
+def _norm_name(name: str) -> str:
+    return " ".join(str(name or "").casefold().split())
+
+
 class Command(BaseCommand):
     help = "JSON mahsulot ro'yxatidan faqat narxlarni tiklash (bitta tenant)"
 
@@ -53,6 +57,7 @@ class Command(BaseCommand):
 
         by_id: dict[str, dict] = {}
         by_barcode: dict[str, dict] = {}
+        by_name: dict[str, dict] = {}
         for row in raw:
             if not isinstance(row, dict):
                 continue
@@ -66,6 +71,9 @@ class Command(BaseCommand):
                 c = str(c or "").strip()
                 if c:
                     by_barcode[c] = row
+            nkey = _norm_name(row.get("name") or "")
+            if nkey and nkey not in by_name:
+                by_name[nkey] = row
 
         dry = options["dry_run"]
         do_cost = not options["no_cost"]
@@ -77,8 +85,9 @@ class Command(BaseCommand):
             )
         )
 
-        updated = skipped = list_updated = 0
+        updated = skipped = list_updated = matched = 0
         samples: list[str] = []
+        used_json_ids: set[str] = set()
 
         with transaction.atomic():
             for product in Product.objects.filter(tenant=tenant).iterator(chunk_size=200):
@@ -88,8 +97,14 @@ class Command(BaseCommand):
                     if code:
                         src = by_barcode.get(code)
                 if not src:
+                    src = by_name.get(_norm_name(product.name))
+                if not src:
                     skipped += 1
                     continue
+
+                matched += 1
+                if src.get("id"):
+                    used_json_ids.add(str(src["id"]))
 
                 new_price = _dec(src.get("price"))
                 new_cost = _dec(src.get("cost_price"))
@@ -110,7 +125,7 @@ class Command(BaseCommand):
 
                 if fields:
                     updated += 1
-                    if len(samples) < 40:
+                    if len(samples) < 50:
                         samples.append(
                             f"{'[dry] ' if dry else ''}{product.name[:45]}: " + "; ".join(bits)
                         )
@@ -142,14 +157,18 @@ class Command(BaseCommand):
             if dry:
                 transaction.set_rollback(True)
 
+        json_only = sum(1 for r in raw if isinstance(r, dict) and str(r.get("id") or "") not in used_json_ids)
+
         self.stdout.write(self.style.MIGRATE_HEADING(f"TENANT: {tenant.server_name}"))
         self.stdout.write(f"  JSON: {path} ({len(raw)} ta)")
+        self.stdout.write(f"  Mos keldi: {matched}")
         self.stdout.write(f"  Narx o'zgarishi: {updated}")
         self.stdout.write(f"  List-price: {list_updated}")
-        self.stdout.write(f"  Skip: {skipped}")
+        self.stdout.write(f"  Skip (serverda JSON yo'q): {skipped}")
+        self.stdout.write(f"  JSON da bor, serverda yo'q/mos emas: ~{json_only}")
         for s in samples:
             self.stdout.write(f"  {s}")
         if dry:
             self.stdout.write(self.style.WARNING("DRY-RUN — yozilmadi"))
         else:
-            self.stdout.write(self.style.SUCCESS("TAYYOR. POS Sinxron (faqat kuloloptom-2)."))
+            self.stdout.write(self.style.SUCCESS(f"TAYYOR. POS Sinxron ({tenant.server_name})."))
