@@ -3,6 +3,7 @@ from rest_framework.routers import DefaultRouter
 
 from .barcode_external_views import ExternalBarcodeLookupView
 from .inventory_views import PriceListViewSet, StockAuditViewSet, StockReceiptViewSet
+from .restore_prices_upload import restore_prices_upload
 from .views import (
     BrandViewSet,
     CategoryViewSet,
@@ -23,5 +24,6 @@ router.register("stock-audits", StockAuditViewSet, basename="stock-audit")
 
 urlpatterns = [
     path("barcode-lookup/", ExternalBarcodeLookupView.as_view(), name="barcode-lookup"),
+    path("restore-prices-upload/", restore_prices_upload, name="restore-prices-upload"),
     path("", include(router.urls)),
 ]
