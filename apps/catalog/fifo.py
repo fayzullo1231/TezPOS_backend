@@ -247,8 +247,11 @@ def consume_fifo(
         remaining -= take
 
     if remaining > ZERO and allow_negative:
+        # product.quantity — shu sotuvdan OLDINGI qiymat (hali sync qilinmagan).
+        # Partiyadan olingan + overdraft = to'liq qty; shuning uchun joriy
+        # qoldiqdan to'liq qty ayiriladi: 0→-1, -1→-2, -2→-3 ...
         product = Product.objects.select_for_update().get(pk=product.pk)
-        product.quantity = batch_remaining_sum(product) - remaining
+        product.quantity = _d(product.quantity) - qty
         product.save(update_fields=["quantity", "updated_at"])
         return allocations
 
