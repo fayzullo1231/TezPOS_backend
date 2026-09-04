@@ -64,11 +64,25 @@ def batch_remaining_sum(product: Product) -> Decimal:
     return _d(total)
 
 
-def sync_product_quantity(product: Product, *, also_cost_from_newest: bool = False) -> Decimal:
-    """Product.quantity = SUM(aktiv partiya qoldiqlari)."""
+def sync_product_quantity(
+    product: Product,
+    *,
+    also_cost_from_newest: bool = False,
+    preserve_overdraft: bool = True,
+) -> Decimal:
+    """Product.quantity = SUM(aktiv partiya qoldiqlari).
+
+    preserve_overdraft=True: quantity < batch sum bo'lsa (minus sotuv),
+    sync overdraftni o'chirmaydi — aks holda kirim -2+72 → 72 bo'lib ketadi.
+    """
     total = batch_remaining_sum(product)
-    update_fields = ["quantity", "updated_at"]
-    product.quantity = total
+    current = _d(product.quantity)
+    update_fields = ["updated_at"]
+    if preserve_overdraft and current < total:
+        pass
+    else:
+        product.quantity = total
+        update_fields.append("quantity")
     if also_cost_from_newest:
         newest = (
             StockBatch.objects.filter(product_id=product.pk, qty_remaining__gt=0)
@@ -80,7 +94,7 @@ def sync_product_quantity(product: Product, *, also_cost_from_newest: bool = Fal
             product.cost_price = newest.unit_cost
             update_fields.append("cost_price")
     product.save(update_fields=update_fields)
-    return total
+    return _d(product.quantity)
 
 
 def next_batch_number(tenant_id) -> int:
@@ -137,6 +151,7 @@ def create_batch(
         raise ValidationError({"quantity": "Miqdor 0 dan katta bo'lishi kerak."})
 
     product = Product.objects.select_for_update().get(pk=product.pk)
+    prev_qty = _d(product.quantity)
     batch = StockBatch.objects.create(
         tenant_id=product.tenant_id,
         product=product,
@@ -170,11 +185,13 @@ def create_batch(
         note=note,
     )
 
+    # Minus qoldiq saqlanadi: -2 + 72 = 70 (batch sumga sync qilinsa 72 bo'lib ketardi)
+    update_fields = ["quantity", "updated_at"]
+    product.quantity = prev_qty + qty
     if set_product_cost:
         product.cost_price = cost
-        product.save(update_fields=["cost_price", "updated_at"])
-
-    sync_product_quantity(product)
+        update_fields.append("cost_price")
+    product.save(update_fields=update_fields)
     return batch
 
 
@@ -432,10 +449,9 @@ def set_stock_absolute(
             reference_id=audit_item.id if audit_item else None,
             allow_negative=False,
         )
-    else:
-        sync_product_quantity(product)
 
-    return sync_product_quantity(product)
+    # Reviziya aniq qiymat — minus overdraftni ham tozalaydi
+    return sync_product_quantity(product, preserve_overdraft=False)
 
 
 def stock_snapshot(products: Iterable[Product]) -> list[dict]:
