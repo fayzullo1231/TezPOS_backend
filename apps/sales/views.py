@@ -28,6 +28,7 @@ from .return_serializers import (
 from .serializers import (
     CustomerSerializer,
     SaleListSerializer,
+    SaleListWithItemsSerializer,
     SaleSerializer,
     SyncSaleSerializer,
 )
@@ -234,18 +235,28 @@ class CustomerViewSet(viewsets.ModelViewSet):
 
 class SaleViewSet(viewsets.ModelViewSet):
     def get_queryset(self):
-        items_qs = SaleItem.objects.order_by("sort_order", "id").prefetch_related(
-            Prefetch(
-                "batch_allocations",
-                queryset=SaleItemBatch.objects.select_related("batch"),
-            )
-        )
-        qs = (
-            Sale.objects.filter(tenant=self.request.user.tenant)
-            .prefetch_related(Prefetch("items", queryset=items_qs))
-            .select_related("customer", "user")
-        )
         params = self.request.query_params
+        include_items = (
+            self.action == "list"
+            and (params.get("include_items") or "").strip().lower()
+            in ("1", "true", "yes")
+        )
+        qs = Sale.objects.filter(tenant=self.request.user.tenant).select_related(
+            "customer", "user"
+        )
+        if include_items:
+            # Analitika: qatorlar kerak, batch_allocations emas
+            items_qs = SaleItem.objects.order_by("sort_order", "id")
+            qs = qs.prefetch_related(Prefetch("items", queryset=items_qs))
+        elif self.action != "list":
+            items_qs = SaleItem.objects.order_by("sort_order", "id").prefetch_related(
+                Prefetch(
+                    "batch_allocations",
+                    queryset=SaleItemBatch.objects.select_related("batch"),
+                )
+            )
+            qs = qs.prefetch_related(Prefetch("items", queryset=items_qs))
+
         search = params.get("search", "").strip()
         date_from = params.get("date_from")
         date_to = params.get("date_to")
@@ -289,6 +300,11 @@ class SaleViewSet(viewsets.ModelViewSet):
 
     def get_serializer_class(self):
         if self.action == "list":
+            include_items = (
+                self.request.query_params.get("include_items") or ""
+            ).strip().lower() in ("1", "true", "yes")
+            if include_items:
+                return SaleListWithItemsSerializer
             return SaleListSerializer
         return SaleSerializer
 
@@ -476,28 +492,44 @@ class TopProductsView(APIView):
     def get(self, request):
         days = min(max(int(request.query_params.get("days", 30)), 1), 365)
         limit = min(max(int(request.query_params.get("limit", 24)), 1), 100)
-        since = timezone.now() - timedelta(days=days)
-        rows = (
-            SaleItem.objects.filter(
-                sale__tenant=request.user.tenant,
-                sale__status=Sale.STATUS_COMPLETED,
-                sale__completed_at__gte=since,
+        date_from = (request.query_params.get("date_from") or request.query_params.get("from") or "").strip()
+        date_to = (request.query_params.get("date_to") or request.query_params.get("to") or "").strip()
+
+        qs = SaleItem.objects.filter(
+            sale__tenant=request.user.tenant,
+            sale__status=Sale.STATUS_COMPLETED,
+        )
+        if date_from and date_to:
+            qs = qs.filter(
+                sale__completed_at__date__gte=date_from,
+                sale__completed_at__date__lte=date_to,
             )
-            .values("product_id")
+        else:
+            since = timezone.now() - timedelta(days=days)
+            qs = qs.filter(sale__completed_at__gte=since)
+
+        rows = (
+            qs.values("product_id", "product__name")
             .annotate(
                 quantity=Sum("quantity"),
                 sales_count=Count("id"),
+                revenue=Sum("total"),
             )
             .order_by("-quantity", "-sales_count")[:limit]
         )
         return Response(
             {
                 "days": days,
+                "date_from": date_from or None,
+                "date_to": date_to or None,
                 "items": [
                     {
                         "product_id": str(row["product_id"]),
+                        "product_name": row.get("product__name") or "",
+                        "name": row.get("product__name") or "",
                         "quantity": float(row["quantity"] or 0),
                         "sales_count": row["sales_count"],
+                        "revenue": float(row.get("revenue") or 0),
                     }
                     for row in rows
                 ],

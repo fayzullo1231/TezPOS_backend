@@ -312,6 +312,30 @@ class SaleSerializer(serializers.ModelSerializer):
         return sale
 
 
+class SaleListItemLiteSerializer(serializers.ModelSerializer):
+    """Ro‘yxat + include_items — batch_allocations siz (tezroq)."""
+
+    class Meta:
+        model = SaleItem
+        fields = [
+            "id",
+            "product_id",
+            "product_name",
+            "quantity",
+            "unit_price",
+            "discount",
+            "total",
+            "sort_order",
+        ]
+
+    def to_representation(self, instance):
+        data = super().to_representation(instance)
+        pid = getattr(instance, "product_id", None)
+        data["product_id"] = str(pid) if pid else None
+        data["sort_order"] = int(getattr(instance, "sort_order", 0) or 0)
+        return data
+
+
 class SaleListSerializer(serializers.ModelSerializer):
     items_count = serializers.IntegerField(read_only=True)
 
@@ -330,11 +354,21 @@ class SaleListSerializer(serializers.ModelSerializer):
             "status",
             "payment_type",
             "comment",
+            "price_list_id",
             "items_count",
             "synced_at",
             "created_at",
             "completed_at",
         ]
+
+
+class SaleListWithItemsSerializer(SaleListSerializer):
+    """GET /api/sales/?include_items=true — analitika uchun qatorlar bilan."""
+
+    items = SaleListItemLiteSerializer(many=True, read_only=True)
+
+    class Meta(SaleListSerializer.Meta):
+        fields = SaleListSerializer.Meta.fields + ["items"]
 
 
 class SyncSaleSerializer(serializers.Serializer):
