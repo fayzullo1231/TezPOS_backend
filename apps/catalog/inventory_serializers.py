@@ -104,12 +104,28 @@ class StockReceiptCreateSerializer(serializers.Serializer):
             )
 
             total = Decimal("0")
+            # receipt.price_list_ids + item.list_prices kalitlari (optom o'zgarishi uchun)
+            item_pl_ids = set()
+            for _row in items_data:
+                for _k in (_row.get("list_prices") or {}).keys():
+                    item_pl_ids.add(str(_k))
+            all_pl_ids = set(str(x) for x in (price_list_ids or [])) | item_pl_ids
             valid_lists = set(
                 str(x)
                 for x in PriceList.objects.filter(
-                    tenant=tenant, id__in=price_list_ids, is_active=True
+                    tenant=tenant,
+                    id__in=all_pl_ids,
+                    is_active=True,
+                    is_selling=False,
                 ).values_list("id", flat=True)
             )
+            if valid_lists and not price_list_ids:
+                try:
+                    receipt.price_list_ids = [int(x) for x in valid_lists]
+                    receipt.save(update_fields=["price_list_ids"])
+                except (TypeError, ValueError):
+                    receipt.price_list_ids = list(valid_lists)
+                    receipt.save(update_fields=["price_list_ids"])
 
             for row in items_data:
                 product = Product.objects.select_for_update().get(
@@ -120,7 +136,9 @@ class StockReceiptCreateSerializer(serializers.Serializer):
                 sale = Decimal(str(row.get("sale_price") or 0))
                 list_prices_raw = row.get("list_prices") or {}
                 list_prices = {
-                    str(k): str(v) for k, v in list_prices_raw.items() if str(k) in valid_lists
+                    str(k): str(v)
+                    for k, v in list_prices_raw.items()
+                    if str(k) in valid_lists
                 }
 
                 line_total = cost * qty
@@ -285,12 +303,27 @@ class StockAuditCreateSerializer(serializers.Serializer):
                 completed_at=timezone.now(),
             )
 
+            item_pl_ids = set()
+            for _row in items_data:
+                for _k in (_row.get("list_prices") or {}).keys():
+                    item_pl_ids.add(str(_k))
+            all_pl_ids = set(str(x) for x in (price_list_ids or [])) | item_pl_ids
             valid_lists = set(
                 str(x)
                 for x in PriceList.objects.filter(
-                    tenant=tenant, id__in=price_list_ids, is_active=True
+                    tenant=tenant,
+                    id__in=all_pl_ids,
+                    is_active=True,
+                    is_selling=False,
                 ).values_list("id", flat=True)
             )
+            if valid_lists and not price_list_ids:
+                try:
+                    audit.price_list_ids = [int(x) for x in valid_lists]
+                    audit.save(update_fields=["price_list_ids"])
+                except (TypeError, ValueError):
+                    audit.price_list_ids = list(valid_lists)
+                    audit.save(update_fields=["price_list_ids"])
 
             for row in items_data:
                 product = Product.objects.select_for_update().get(
