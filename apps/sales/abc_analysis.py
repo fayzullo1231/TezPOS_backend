@@ -1,29 +1,28 @@
 """ABC analiz — sotuv / foyda / dona bo'yicha Pareto (A≤80%, B≤95%, C).
 
-Cost: SaleItemBatch.unit_cost (FIFO snapshot). Yo'q bo'lsa Product.cost_price.
-Retail: Sale.price_list_id bo'sh. Optom: price_list_id to'ldirilgan.
+Cost: SaleItemBatch.unit_cost (FIFO). Yo'q bo'lsa Product.cost_price.
+Kanal: price_list_id + birlik narx vs sotuv/optom narx (POS ko'pincha price_list_id yubormaydi).
 """
 
 from __future__ import annotations
 
+from collections import defaultdict
 from datetime import datetime, timedelta
 from decimal import Decimal, InvalidOperation
 from typing import Any
 
-from django.db.models import Case, CharField, Count, F, Q, Sum, Value, When
-from django.db.models.functions import Coalesce
+from django.db.models import F, Q, Sum
 from django.utils import timezone
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
-from apps.catalog.models import Product
+from apps.catalog.models import PriceList, Product, ProductPrice
 from apps.sales.models import Sale, SaleItem, SaleItemBatch
 
 ZERO = Decimal("0")
 Q2 = Decimal("0.01")
 Q3 = Decimal("0.001")
 
-# Configurable thresholds (cumulative share %)
 ABC_THRESHOLDS = {"A": Decimal("80"), "B": Decimal("95")}
 
 
@@ -49,7 +48,6 @@ def _parse_date(raw: str | None):
 
 
 def _range_from_params(params) -> tuple:
-    """(date_from, date_to, preset_label)."""
     today = timezone.localdate()
     preset = (params.get("preset") or "").strip().lower()
     df = _parse_date(params.get("date_from") or params.get("from"))
@@ -82,29 +80,7 @@ def _range_from_params(params) -> tuple:
     if preset in ("1y", "365", "year"):
         return today - timedelta(days=364), today, "1y"
 
-    # default 30 days
     return today - timedelta(days=29), today, "30d"
-
-
-def _channel_case():
-    """retail | wholesale from Sale.price_list_id."""
-    return Case(
-        When(Q(sale__price_list_id="") | Q(sale__price_list_id__isnull=True), then=Value("retail")),
-        default=Value("wholesale"),
-        output_field=CharField(),
-    )
-
-
-def _batch_channel_case():
-    return Case(
-        When(
-            Q(sale_item__sale__price_list_id="")
-            | Q(sale_item__sale__price_list_id__isnull=True),
-            then=Value("retail"),
-        ),
-        default=Value("wholesale"),
-        output_field=CharField(),
-    )
 
 
 def _fmt_money(n: Decimal) -> str:
@@ -117,6 +93,101 @@ def _margin(profit: Decimal, sales: Decimal) -> float | None:
     if sales == 0:
         return None
     return float((profit / sales * 100).quantize(Decimal("0.01")))
+
+
+def _is_selling_list_name(name: str) -> bool:
+    lower = (name or "").lower()
+    return any(
+        x in lower
+        for x in (
+            "sotuv",
+            "sotish",
+            "chakana",
+            "retail",
+            "selling",
+            "продаж",
+            "розниц",
+        )
+    )
+
+
+def _is_optom_list_name(name: str) -> bool:
+    lower = (name or "").lower()
+    return any(x in lower for x in ("optom", "wholesale", "ulgurji", "опт"))
+
+
+def _price_lists_meta(tenant) -> tuple[set[str], set[str]]:
+    """(selling_ids, wholesale_ids)."""
+    selling: set[str] = set()
+    wholesale: set[str] = set()
+    for pl in PriceList.objects.filter(tenant=tenant, is_active=True).only(
+        "id", "name", "is_selling"
+    ):
+        sid = str(pl.id)
+        if pl.is_selling or (_is_selling_list_name(pl.name) and not _is_optom_list_name(pl.name)):
+            selling.add(sid)
+        else:
+            wholesale.add(sid)
+    return selling, wholesale
+
+
+def _wholesale_prices_by_product(tenant, wholesale_ids: set[str]) -> dict[str, list[Decimal]]:
+    out: dict[str, list[Decimal]] = defaultdict(list)
+    if not wholesale_ids:
+        return out
+    qs = ProductPrice.objects.filter(
+        tenant=tenant, price_list_id__in=list(wholesale_ids), price__gt=0
+    ).values_list("product_id", "price")
+    for pid, price in qs:
+        out[str(pid)].append(_d(price))
+    return out
+
+
+def _near(a: Decimal, b: Decimal) -> bool:
+    if b <= 0 or a <= 0:
+        return False
+    tol = max(Decimal("1"), (b * Decimal("0.02")).quantize(Q2))
+    return abs(a - b) <= tol
+
+
+def classify_channel(
+    *,
+    unit_price,
+    selling_price,
+    wholesale_prices: list[Decimal],
+    price_list_id: str | None,
+    selling_ids: set[str],
+    wholesale_ids: set[str],
+) -> str:
+    """retail | wholesale — price_list_id + birlik narx."""
+    plid = (price_list_id or "").strip()
+    up = _d(unit_price)
+    sell = _d(selling_price)
+    whs = [p for p in (wholesale_prices or []) if p > 0]
+
+    if plid:
+        if plid in wholesale_ids:
+            return "wholesale"
+        if plid in selling_ids:
+            return "retail"
+        # Noma'lum UUID — odatda optom/boshqa ro'yxat
+        if plid not in selling_ids:
+            # Agar aniq sotuv narxiga teng bo'lsa — sotuv
+            if sell > 0 and _near(up, sell):
+                return "retail"
+            return "wholesale"
+
+    for wp in whs:
+        if _near(up, wp) and (sell <= 0 or up <= sell - Decimal("0.5")):
+            return "wholesale"
+
+    if sell > 0 and _near(up, sell):
+        return "retail"
+
+    if sell > 0 and up > 0 and up < sell - Decimal("0.5") and whs:
+        return "wholesale"
+
+    return "retail"
 
 
 def build_abc_payload(
@@ -137,10 +208,15 @@ def build_abc_payload(
     if metric == "quantity":
         metric = "qty"
     channel = (channel or "all").lower()
-    if channel not in ("all", "retail", "wholesale", "optom"):
+    if channel not in ("all", "retail", "wholesale", "optom", "sotuv"):
         channel = "all"
     if channel == "optom":
         channel = "wholesale"
+    if channel == "sotuv":
+        channel = "retail"
+
+    selling_ids, wholesale_ids = _price_lists_meta(tenant)
+    wh_by_product = _wholesale_prices_by_product(tenant, wholesale_ids)
 
     base_sale = Q(
         sale__tenant=tenant,
@@ -148,14 +224,9 @@ def build_abc_payload(
         sale__completed_at__date__gte=date_from,
         sale__completed_at__date__lte=date_to,
     )
-    if channel == "retail":
-        base_sale &= Q(sale__price_list_id="") | Q(sale__price_list_id__isnull=True)
-    elif channel == "wholesale":
-        base_sale &= ~Q(sale__price_list_id="") & Q(sale__price_list_id__isnull=False)
 
     sales_rows = (
         SaleItem.objects.filter(base_sale)
-        .annotate(channel=_channel_case())
         .values(
             "product_id",
             "product__name",
@@ -163,13 +234,11 @@ def build_abc_payload(
             "product__category_id",
             "product__category__name",
             "product__cost_price",
-            "channel",
+            "product__price",
+            "unit_price",
+            "sale__price_list_id",
         )
-        .annotate(
-            qty=Sum("quantity"),
-            revenue=Sum("total"),
-            lines=Count("id"),
-        )
+        .annotate(qty=Sum("quantity"), revenue=Sum("total"))
     )
 
     cost_base = Q(
@@ -178,41 +247,48 @@ def build_abc_payload(
         sale_item__sale__completed_at__date__gte=date_from,
         sale_item__sale__completed_at__date__lte=date_to,
     )
-    if channel == "retail":
-        cost_base &= Q(sale_item__sale__price_list_id="") | Q(
-            sale_item__sale__price_list_id__isnull=True
-        )
-    elif channel == "wholesale":
-        cost_base &= ~Q(sale_item__sale__price_list_id="") & Q(
-            sale_item__sale__price_list_id__isnull=False
-        )
-
     cost_rows = (
         SaleItemBatch.objects.filter(cost_base)
-        .annotate(channel=_batch_channel_case())
-        .values("sale_item__product_id", "channel")
+        .values(
+            "sale_item__product_id",
+            "sale_item__unit_price",
+            "sale_item__sale__price_list_id",
+            "sale_item__product__price",
+        )
         .annotate(cost=Sum(F("quantity") * F("unit_cost")))
     )
-    cost_map: dict[tuple[str, str], Decimal] = {}
+
+    cost_map: dict[tuple[str, str], Decimal] = defaultdict(lambda: ZERO)
     for r in cost_rows:
         pid = str(r["sale_item__product_id"])
-        ch = r["channel"]
-        cost_map[(pid, ch)] = _d(r["cost"])
+        ch = classify_channel(
+            unit_price=r["sale_item__unit_price"],
+            selling_price=r["sale_item__product__price"],
+            wholesale_prices=wh_by_product.get(pid, []),
+            price_list_id=r["sale_item__sale__price_list_id"],
+            selling_ids=selling_ids,
+            wholesale_ids=wholesale_ids,
+        )
+        cost_map[(pid, ch)] += _d(r["cost"])
 
-    # Merge per product
     products: dict[str, dict] = {}
     for r in sales_rows:
         pid = str(r["product_id"])
-        ch = r["channel"]
+        ch = classify_channel(
+            unit_price=r["unit_price"],
+            selling_price=r["product__price"],
+            wholesale_prices=wh_by_product.get(pid, []),
+            price_list_id=r["sale__price_list_id"],
+            selling_ids=selling_ids,
+            wholesale_ids=wholesale_ids,
+        )
+        if channel != "all" and ch != channel:
+            continue
+
         qty = _d(r["qty"], Q3)
         rev = _d(r["revenue"])
-        cost = cost_map.get((pid, ch))
-        if cost is None:
-            # Fallback: current product cost × qty (no FIFO snapshot)
-            unit = _d(r.get("product__cost_price"))
-            cost = (unit * qty).quantize(Q2)
-        profit = rev - cost
-
+        # Cost shu kanal uchun umumiy — bir nechta unit_price bo'lsa proporsional emas,
+        # lekin keyinroq qayta taqsimlash: avval to'liq costni bir marta olamiz.
         p = products.get(pid)
         if not p:
             p = {
@@ -221,6 +297,7 @@ def build_abc_payload(
                 "barcode": r.get("product__barcode") or "",
                 "category_id": str(r["product__category_id"] or "") or None,
                 "category": r.get("product__category__name") or "",
+                "cost_price": _d(r.get("product__cost_price")),
                 "qty": ZERO,
                 "retail_qty": ZERO,
                 "wholesale_qty": ZERO,
@@ -233,23 +310,40 @@ def build_abc_payload(
                 "sales": ZERO,
                 "cost": ZERO,
                 "profit": ZERO,
+                "_retail_rev_for_cost": ZERO,
+                "_wh_rev_for_cost": ZERO,
             }
             products[pid] = p
 
         p["qty"] += qty
         p["sales"] += rev
-        p["cost"] += cost
-        p["profit"] += profit
         if ch == "retail":
             p["retail_qty"] += qty
             p["retail_sales"] += rev
-            p["retail_cost"] += cost
-            p["retail_profit"] += profit
+            p["_retail_rev_for_cost"] += rev
         else:
             p["wholesale_qty"] += qty
             p["wholesale_sales"] += rev
-            p["wholesale_cost"] += cost
-            p["wholesale_profit"] += profit
+            p["_wh_rev_for_cost"] += rev
+
+    # Cost: kanal bo'yicha FIFO; yo'qsa cost_price * qty
+    for pid, p in products.items():
+        r_cost = cost_map.get((pid, "retail"), ZERO)
+        w_cost = cost_map.get((pid, "wholesale"), ZERO)
+        if r_cost == 0 and p["retail_qty"] > 0:
+            r_cost = (p["cost_price"] * p["retail_qty"]).quantize(Q2)
+        if w_cost == 0 and p["wholesale_qty"] > 0:
+            w_cost = (p["cost_price"] * p["wholesale_qty"]).quantize(Q2)
+
+        p["retail_cost"] = r_cost
+        p["wholesale_cost"] = w_cost
+        p["cost"] = r_cost + w_cost
+        p["retail_profit"] = p["retail_sales"] - r_cost
+        p["wholesale_profit"] = p["wholesale_sales"] - w_cost
+        p["profit"] = p["sales"] - p["cost"]
+        p.pop("cost_price", None)
+        p.pop("_retail_rev_for_cost", None)
+        p.pop("_wh_rev_for_cost", None)
 
     items_list = list(products.values())
     if not items_list:
@@ -268,7 +362,6 @@ def build_abc_payload(
             "categories": [],
         }
 
-    # Sort key for ABC
     def sort_key(row):
         if metric == "profit":
             return row["profit"]
@@ -280,7 +373,6 @@ def build_abc_payload(
 
     total_metric = sum((sort_key(x) for x in items_list), ZERO)
     if total_metric <= 0:
-        # All zero/negative metric — still classify by order
         total_metric = Decimal("1")
 
     cumulative = ZERO
@@ -289,7 +381,9 @@ def build_abc_payload(
         share = (val / total_metric * 100) if total_metric else ZERO
         cumulative += share
         row["share"] = float(share.quantize(Decimal("0.01")))
-        row["cumulative_share"] = float(min(cumulative, Decimal("100")).quantize(Decimal("0.01")))
+        row["cumulative_share"] = float(
+            min(cumulative, Decimal("100")).quantize(Decimal("0.01"))
+        )
         if cumulative <= a_max:
             row["abc"] = "A"
         elif cumulative <= b_max:
@@ -302,7 +396,6 @@ def build_abc_payload(
         row["wholesale_margin"] = _margin(row["wholesale_profit"], row["wholesale_sales"])
         row["is_loss"] = row["profit"] < 0
 
-        # Serialize decimals
         for k in (
             "qty",
             "retail_qty",
@@ -348,8 +441,8 @@ def build_abc_payload(
             "qty": float(g_qty),
             "label": {
                 "A": "Eng muhim mahsulotlar",
-                "B": "O‘rtacha muhim mahsulotlar",
-                "C": "Nisbatan kam ulushli mahsulotlar",
+                "B": "O‘rtacha muhim",
+                "C": "Kam ulushli",
             }[letter],
         }
 
@@ -382,9 +475,7 @@ def build_abc_payload(
     }
 
     charts = {
-        "abc_distribution": [
-            {"letter": L, "count": groups[L]["count"]} for L in "ABC"
-        ],
+        "abc_distribution": [{"letter": L, "count": groups[L]["count"]} for L in "ABC"],
         "sales_contribution": [
             {"letter": L, "value": groups[L]["sales_share"]} for L in "ABC"
         ],
@@ -422,9 +513,11 @@ class AbcAnalysisView(APIView):
         tenant = request.user.tenant
         date_from, date_to, preset = _range_from_params(request.query_params)
         metric = request.query_params.get("metric") or "sales"
-        channel = request.query_params.get("channel") or request.query_params.get(
-            "sale_type"
-        ) or "all"
+        channel = (
+            request.query_params.get("channel")
+            or request.query_params.get("sale_type")
+            or "all"
+        )
         try:
             a_max = Decimal(str(request.query_params.get("a_max") or ABC_THRESHOLDS["A"]))
             b_max = Decimal(str(request.query_params.get("b_max") or ABC_THRESHOLDS["B"]))
