@@ -170,9 +170,7 @@ def classify_channel(
             return "wholesale"
         if plid in selling_ids:
             return "retail"
-        # Noma'lum UUID — odatda optom/boshqa ro'yxat
         if plid not in selling_ids:
-            # Agar aniq sotuv narxiga teng bo'lsa — sotuv
             if sell > 0 and _near(up, sell):
                 return "retail"
             return "wholesale"
@@ -188,6 +186,90 @@ def classify_channel(
         return "wholesale"
 
     return "retail"
+
+
+def _loss_reason(unit_price: Decimal, unit_cost: Decimal, sales: Decimal, cost: Decimal) -> str:
+    if unit_cost > unit_price and unit_price > 0:
+        return (
+            f"Tannarx {_fmt_money(unit_cost)} so‘m, sotuv narxi {_fmt_money(unit_price)} so‘m — "
+            "tannarx yuqori"
+        )
+    if cost > sales:
+        return (
+            f"Chek summasi {_fmt_money(sales)} so‘m, tannarx {_fmt_money(cost)} so‘m"
+        )
+    return "Sotuv tannarxdan past"
+
+
+def build_loss_checks(
+    tenant,
+    *,
+    date_from,
+    date_to,
+    product_ids: list[str],
+    selling_ids: set[str],
+    wholesale_ids: set[str],
+    wh_by_product: dict[str, list[Decimal]],
+    channel: str,
+) -> dict[str, list[dict]]:
+    """Zararli mahsulotlar uchun chek qatorlari."""
+    if not product_ids:
+        return {}
+    qs = (
+        SaleItem.objects.filter(
+            sale__tenant=tenant,
+            sale__status=Sale.STATUS_COMPLETED,
+            sale__completed_at__date__gte=date_from,
+            sale__completed_at__date__lte=date_to,
+            product_id__in=product_ids,
+        )
+        .select_related("sale", "product")
+        .prefetch_related("batch_allocations")
+        .order_by("sale__completed_at", "sale__receipt_number")
+    )
+    out: dict[str, list[dict]] = defaultdict(list)
+    for item in qs:
+        pid = str(item.product_id)
+        ch = classify_channel(
+            unit_price=item.unit_price,
+            selling_price=getattr(item.product, "price", 0),
+            wholesale_prices=wh_by_product.get(pid, []),
+            price_list_id=getattr(item.sale, "price_list_id", "") or "",
+            selling_ids=selling_ids,
+            wholesale_ids=wholesale_ids,
+        )
+        if channel != "all" and ch != channel:
+            continue
+        qty = _d(item.quantity, Q3)
+        sales = _d(item.total)
+        cost = ZERO
+        for alloc in item.batch_allocations.all():
+            cost += _d(alloc.quantity, Q3) * _d(alloc.unit_cost)
+        cost = cost.quantize(Q2)
+        if cost == 0 and qty > 0:
+            cost = (_d(getattr(item.product, "cost_price", 0)) * qty).quantize(Q2)
+        profit = sales - cost
+        if profit >= 0:
+            continue
+        unit_cost = (cost / qty).quantize(Q2) if qty > 0 else ZERO
+        unit_price = _d(item.unit_price)
+        dt = item.sale.completed_at
+        out[pid].append(
+            {
+                "receipt_number": int(item.sale.receipt_number or 0),
+                "sale_id": str(item.sale_id),
+                "date": dt.strftime("%d.%m.%Y %H:%M") if dt else "",
+                "channel": "sotuv" if ch == "retail" else "optom",
+                "qty": float(qty),
+                "unit_price": float(unit_price),
+                "unit_cost": float(unit_cost),
+                "sales": float(sales),
+                "cost": float(cost),
+                "profit": float(profit),
+                "reason": _loss_reason(unit_price, unit_cost, sales, cost),
+            }
+        )
+    return out
 
 
 def build_abc_payload(
@@ -437,7 +519,7 @@ def build_abc_payload(
         row["retail_margin"] = _margin(row["retail_profit"], row["retail_sales"])
         row["wholesale_margin"] = _margin(row["wholesale_profit"], row["wholesale_sales"])
         row["is_loss"] = row["profit"] < 0
-        row["sold"] = val > 0 or row["qty"] > 0
+        row["sold"] = row["qty"] > 0 or row["sales"] > 0
 
         for k in (
             "qty",
@@ -454,6 +536,30 @@ def build_abc_payload(
             "profit",
         ):
             row[k] = float(row[k])
+
+    loss_pids = [str(x["product_id"]) for x in items_list if x.get("is_loss")]
+    loss_map = build_loss_checks(
+        tenant,
+        date_from=date_from,
+        date_to=date_to,
+        product_ids=loss_pids,
+        selling_ids=selling_ids,
+        wholesale_ids=wholesale_ids,
+        wh_by_product=wh_by_product,
+        channel=channel,
+    )
+    for row in items_list:
+        pid = str(row["product_id"])
+        checks = loss_map.get(pid, [])
+        row["loss_checks"] = checks
+        if checks:
+            row["loss_summary"] = f"{len(checks)} ta chekda zarar"
+        elif not row.get("sold"):
+            row["loss_summary"] = ""
+            row["unsold_note"] = "Shu davrda sotilmagan"
+        else:
+            row["loss_summary"] = ""
+            row["unsold_note"] = ""
 
     total_sales = sum((_d(x["sales"]) for x in items_list), ZERO)
     total_cost = sum((_d(x["cost"]) for x in items_list), ZERO)
@@ -494,10 +600,11 @@ def build_abc_payload(
 
     summary = {
         "products_total": Product.objects.filter(tenant=tenant, is_active=True).count(),
-        "products_sold": sold_count,
+        "products_sold": sum(1 for x in items_list if x.get("sold")),
         "a_count": groups["A"]["count"],
         "b_count": groups["B"]["count"],
         "c_count": groups["C"]["count"],
+        "loss_count": sum(1 for x in items_list if x.get("is_loss")),
         "total_sales": float(total_sales),
         "total_sales_display": _fmt_money(total_sales),
         "total_cost": float(total_cost),
