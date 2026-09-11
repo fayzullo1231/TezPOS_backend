@@ -1,6 +1,7 @@
 from django.urls import include, path
 from rest_framework.routers import DefaultRouter
 
+from .abc_analysis import AbcAnalysisView
 from .views import (
     CustomerViewSet,
     DailyStatsView,
@@ -19,5 +20,6 @@ urlpatterns = [
     path("sync/", SyncSalesView.as_view()),
     path("stats/daily/", DailyStatsView.as_view()),
     path("stats/top-products/", TopProductsView.as_view()),
+    path("stats/abc/", AbcAnalysisView.as_view()),
     path("", include(router.urls)),
 ]
