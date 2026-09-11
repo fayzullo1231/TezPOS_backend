@@ -181,6 +181,9 @@ class StockReceiptCreateSerializer(serializers.Serializer):
                         price_list=pl,
                         defaults={"price": Decimal(price_str)},
                     )
+                if list_prices:
+                    # sync-state revision uchun (faqat optom o'zgarsa ham)
+                    product.save(update_fields=["updated_at"])
 
             receipt.total = total
             receipt.save(update_fields=["total"])
@@ -367,9 +370,8 @@ class StockAuditCreateSerializer(serializers.Serializer):
                 if include_selling and sale is not None:
                     product.price = Decimal(str(sale))
                     update_fields.append("price")
-                if len(update_fields) > 1:
-                    product.save(update_fields=update_fields)
 
+                lp_changed = False
                 for pl_id, price_str in list_prices.items():
                     pl = PriceList.objects.filter(tenant=tenant, id=pl_id).first()
                     if not pl or pl.is_selling:
@@ -380,6 +382,10 @@ class StockAuditCreateSerializer(serializers.Serializer):
                         price_list=pl,
                         defaults={"price": Decimal(price_str)},
                     )
+                    lp_changed = True
+
+                if len(update_fields) > 1 or lp_changed:
+                    product.save(update_fields=update_fields)
 
             product_ids = [row["product_id"] for row in items_data]
             products = Product.objects.filter(tenant=tenant, id__in=product_ids)

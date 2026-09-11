@@ -269,6 +269,7 @@ class ProductSerializer(serializers.ModelSerializer):
             str(x)
             for x in self._active_price_lists(tenant).values_list("id", flat=True)
         }
+        changed = False
         for pl_id, price in list_prices.items():
             if pl_id not in active_ids:
                 continue
@@ -278,6 +279,9 @@ class ProductSerializer(serializers.ModelSerializer):
                 price_list_id=pl_id,
                 defaults={"price": price},
             )
+            changed = True
+        if changed:
+            product.save(update_fields=["updated_at"])
 
     def _parse_barcodes_raw(self, raw):
         """Multipart/JSON dan kelgan barcodes ni ro'yxatga aylantiradi."""

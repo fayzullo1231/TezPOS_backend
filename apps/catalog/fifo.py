@@ -264,11 +264,14 @@ def consume_fifo(
         remaining -= take
 
     if remaining > ZERO and allow_negative:
-        # product.quantity — shu sotuvdan OLDINGI qiymat (hali sync qilinmagan).
-        # Partiyadan olingan + overdraft = to'liq qty; shuning uchun joriy
-        # qoldiqdan to'liq qty ayiriladi: 0→-1, -1→-2, -2→-3 ...
-        product = Product.objects.select_for_update().get(pk=product.pk)
-        product.quantity = _d(product.quantity) - qty
+        # To'g'ri yakuniy qoldiq = sotuvdan OLDINGI haqiqiy qoldiq − sotuv soni.
+        # Stale cache (product.quantity > partiya yig'indisi) bo'lsa available
+        # asosida hisoblanadi; minus overdraft (quantity < available) saqlanadi.
+        # Misol: 10−3=7; 0−1=−1; −2−1=−3; stale 100 / partiya 10, sotuv 15 → −5.
+        before = _d(product.quantity)
+        if before > available:
+            before = available
+        product.quantity = before - qty
         product.save(update_fields=["quantity", "updated_at"])
         return allocations
 
@@ -455,14 +458,25 @@ def set_stock_absolute(
 
 
 def stock_snapshot(products: Iterable[Product]) -> list[dict]:
+    """Frontend cache uchun qoldiq + narxlar (DB bilan bir xil)."""
+    from apps.catalog.serializers import product_list_prices_dict
+
+    qs = products
+    if hasattr(products, "prefetch_related"):
+        qs = products.prefetch_related("list_prices__price_list", "barcodes")
     out = []
-    for p in products:
+    for p in qs:
         out.append(
             {
                 "product_id": str(p.id),
                 "name": p.name,
                 "stock": str(p.quantity),
+                "quantity": str(p.quantity),
                 "last_cost": str(p.cost_price),
+                "cost_price": str(p.cost_price),
+                "price": str(p.price),
+                "barcode": p.barcode or "",
+                "list_prices": product_list_prices_dict(p),
             }
         )
     return out
