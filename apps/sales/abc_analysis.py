@@ -345,6 +345,38 @@ def build_abc_payload(
         p.pop("_retail_rev_for_cost", None)
         p.pop("_wh_rev_for_cost", None)
 
+    # Katalogdagi barcha faol mahsulotlar (shu davrda sotilmaganlar ham — C guruh)
+    if channel == "all":
+        for row in Product.objects.filter(tenant=tenant, is_active=True).values(
+            "id",
+            "name",
+            "barcode",
+            "category_id",
+            "category__name",
+        ):
+            pid = str(row["id"])
+            if pid in products:
+                continue
+            products[pid] = {
+                "product_id": pid,
+                "name": row.get("name") or "",
+                "barcode": row.get("barcode") or "",
+                "category_id": str(row["category_id"] or "") or None,
+                "category": row.get("category__name") or "",
+                "qty": ZERO,
+                "retail_qty": ZERO,
+                "wholesale_qty": ZERO,
+                "retail_sales": ZERO,
+                "wholesale_sales": ZERO,
+                "retail_cost": ZERO,
+                "wholesale_cost": ZERO,
+                "retail_profit": ZERO,
+                "wholesale_profit": ZERO,
+                "sales": ZERO,
+                "cost": ZERO,
+                "profit": ZERO,
+            }
+
     items_list = list(products.values())
     if not items_list:
         return {
@@ -371,30 +403,41 @@ def build_abc_payload(
 
     items_list.sort(key=sort_key, reverse=True)
 
-    total_metric = sum((sort_key(x) for x in items_list), ZERO)
-    if total_metric <= 0:
-        total_metric = Decimal("1")
+    # Pareto faqat ijobiy metrika bo'yicha (0 li mahsulotlar ulushni buzmasin)
+    positive_total = sum((sort_key(x) for x in items_list if sort_key(x) > 0), ZERO)
+    if positive_total <= 0:
+        positive_total = Decimal("1")
 
     cumulative = ZERO
+    sold_count = 0
     for row in items_list:
         val = sort_key(row)
-        share = (val / total_metric * 100) if total_metric else ZERO
-        cumulative += share
-        row["share"] = float(share.quantize(Decimal("0.01")))
-        row["cumulative_share"] = float(
-            min(cumulative, Decimal("100")).quantize(Decimal("0.01"))
-        )
-        if cumulative <= a_max:
-            row["abc"] = "A"
-        elif cumulative <= b_max:
-            row["abc"] = "B"
-        else:
+        if val <= 0:
+            row["share"] = 0.0
+            row["cumulative_share"] = float(
+                min(cumulative, Decimal("100")).quantize(Decimal("0.01"))
+            )
             row["abc"] = "C"
+        else:
+            sold_count += 1
+            share = val / positive_total * 100
+            cumulative += share
+            row["share"] = float(share.quantize(Decimal("0.01")))
+            row["cumulative_share"] = float(
+                min(cumulative, Decimal("100")).quantize(Decimal("0.01"))
+            )
+            if cumulative <= a_max:
+                row["abc"] = "A"
+            elif cumulative <= b_max:
+                row["abc"] = "B"
+            else:
+                row["abc"] = "C"
 
         row["margin"] = _margin(row["profit"], row["sales"])
         row["retail_margin"] = _margin(row["retail_profit"], row["retail_sales"])
         row["wholesale_margin"] = _margin(row["wholesale_profit"], row["wholesale_sales"])
         row["is_loss"] = row["profit"] < 0
+        row["sold"] = val > 0 or row["qty"] > 0
 
         for k in (
             "qty",
@@ -451,7 +494,7 @@ def build_abc_payload(
 
     summary = {
         "products_total": Product.objects.filter(tenant=tenant, is_active=True).count(),
-        "products_sold": len(items_list),
+        "products_sold": sold_count,
         "a_count": groups["A"]["count"],
         "b_count": groups["B"]["count"],
         "c_count": groups["C"]["count"],
@@ -492,7 +535,7 @@ def build_abc_payload(
 
     return {
         "ok": True,
-        "empty": False,
+        "empty": len(items_list) == 0,
         "date_from": str(date_from),
         "date_to": str(date_to),
         "metric": metric,
