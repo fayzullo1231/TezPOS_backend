@@ -9,6 +9,14 @@ def normalize_barcode(code: str) -> str:
     return (code or "").strip().replace(" ", "")
 
 
+def release_product_barcodes(product: Product) -> None:
+    """Mahsulot shtrix kodlarini bo'shatadi (boshqa mahsulotga o'tkazish uchun)."""
+    ProductBarcode.objects.filter(product=product).delete()
+    if product.barcode:
+        product.barcode = ""
+        product.save(update_fields=["barcode", "updated_at"])
+
+
 def find_product_by_barcode(tenant, code: str) -> Product | None:
     code = normalize_barcode(code)
     if not code:
@@ -54,19 +62,25 @@ def sync_product_barcodes(product: Product, codes: list[str]) -> None:
         return
 
     for code in normalized:
-        existing = ProductBarcode.objects.filter(tenant=tenant, code=code).select_related(
-            "product"
-        ).first()
+        existing = (
+            ProductBarcode.objects.filter(tenant=tenant, code=code)
+            .select_related("product")
+            .first()
+        )
         if existing and existing.product_id != product.id:
             other = existing.product
-            other_name = (other.name or "").strip() or f"#{other.id}"
-            raise ValueError(
-                f"Shtrix kod {code} — «{other_name}» mahsulotida bor"
-            )
+            # Nofaol (o'chirilgan) mahsulot — kodni bo'shatib beramiz
+            if not other.is_active:
+                release_product_barcodes(other)
+            else:
+                other_name = (other.name or "").strip() or f"#{other.id}"
+                raise ValueError(
+                    f"Shtrix kod {code} — «{other_name}» mahsulotida bor"
+                )
 
-        # Asosiy barcode maydonida ham bo'lishi mumkin
+        # Asosiy barcode maydonida ham bo'lishi mumkin (faqat faol)
         other_primary = (
-            Product.objects.filter(tenant=tenant, barcode=code)
+            Product.objects.filter(tenant=tenant, barcode=code, is_active=True)
             .exclude(id=product.id)
             .first()
         )
@@ -75,6 +89,12 @@ def sync_product_barcodes(product: Product, codes: list[str]) -> None:
             raise ValueError(
                 f"Shtrix kod {code} — «{other_name}» mahsulotida bor"
             )
+
+        # Nofaol mahsulotda asosiy barcode qolgan bo'lsa — tozalash
+        for stale in Product.objects.filter(
+            tenant=tenant, barcode=code, is_active=False
+        ).exclude(id=product.id):
+            release_product_barcodes(stale)
 
     ProductBarcode.objects.filter(product=product).exclude(code__in=normalized).delete()
 

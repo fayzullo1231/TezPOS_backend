@@ -187,7 +187,11 @@ class ProductViewSet(TenantMixin, viewsets.ModelViewSet):
 
     def perform_destroy(self, instance):
         """Sotuvda ishlatilgan mahsulot — yumshoq o'chirish; aks holda bazadan o'chirish."""
+        from apps.catalog.barcode_lookup import release_product_barcodes
         from apps.sales.models import SaleItem
+
+        # Shtrix kodlar boshqa mahsulotga o'tishi uchun bo'shatiladi
+        release_product_barcodes(instance)
 
         if SaleItem.objects.filter(product=instance).exists():
             instance.is_active = False
