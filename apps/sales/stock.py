@@ -1,7 +1,7 @@
 """Ombordagi qoldiq — Kirim / Sotuv / Qaytarish / Reviziya (FIFO partiyalar).
 
-Haqiqiy manba: StockBatch.qty_remaining
-Product.quantity — cache (fifo.sync_product_quantity).
+StockBatch.qty_remaining — FIFO tannarx uchun.
+Product.quantity — haqiqiy qoldiq (sotuv aynan sotilgan miqdorni ayiradi).
 """
 
 from __future__ import annotations

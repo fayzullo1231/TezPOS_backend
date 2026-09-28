@@ -1,7 +1,8 @@
-"""FIFO partiya ombori — Single Source of Truth: StockBatch.qty_remaining.
+"""FIFO partiya ombori.
 
-Product.quantity — tezkor cache; har bir kirim/sotuv/return/audit dan keyin
-partiyalar yig'indisiga sinxronlanadi.
+Product.quantity — haqiqiy qoldiq (minus bo'lishi mumkin): sotuv aynan sotilgan
+miqdorni ayiradi, kirim/qaytarish qo'shadi. StockBatch.qty_remaining — tannarx
+(FIFO) uchun; minus holatda keyingi kirim avval overdraftni yopadi.
 """
 
 from __future__ import annotations
@@ -143,6 +144,7 @@ def create_batch(
     received_at=None,
     note: str = "",
     set_product_cost: bool = False,
+    absorb_overdraft: bool = True,
 ) -> StockBatch:
     """Yangi kirim/qaytarish/reviziya partiyasi. Eski partiyalar o'zgarmaydi."""
     qty = _d(quantity)
@@ -152,12 +154,17 @@ def create_batch(
 
     product = Product.objects.select_for_update().get(pk=product.pk)
     prev_qty = _d(product.quantity)
+    # Minusda sotilgan dona partiyasiz ketgan — yangi partiya avval shuni yopadi,
+    # aks holda keyingi sotuvda partiya yig'indisi qoldiqdan katta bo'lib qoladi.
+    remaining = qty
+    if absorb_overdraft and prev_qty < ZERO:
+        remaining = max(ZERO, qty + prev_qty)
     batch = StockBatch.objects.create(
         tenant_id=product.tenant_id,
         product=product,
         batch_number=next_batch_number(product.tenant_id),
         qty_received=qty,
-        qty_remaining=qty,
+        qty_remaining=remaining,
         unit_cost=cost,
         received_at=received_at or timezone.now(),
         source_type=source_type,
@@ -213,6 +220,7 @@ def consume_fifo(
         return []
 
     product = Product.objects.select_for_update().get(pk=product.pk)
+    before = _d(product.quantity)
     batches = list(
         StockBatch.objects.select_for_update()
         .filter(product_id=product.pk, qty_remaining__gt=0)
@@ -263,19 +271,10 @@ def consume_fifo(
         )
         remaining -= take
 
-    if remaining > ZERO and allow_negative:
-        # To'g'ri yakuniy qoldiq = sotuvdan OLDINGI haqiqiy qoldiq − sotuv soni.
-        # Stale cache (product.quantity > partiya yig'indisi) bo'lsa available
-        # asosida hisoblanadi; minus overdraft (quantity < available) saqlanadi.
-        # Misol: 10−3=7; 0−1=−1; −2−1=−3; stale 100 / partiya 10, sotuv 15 → −5.
-        before = _d(product.quantity)
-        if before > available:
-            before = available
-        product.quantity = before - qty
-        product.save(update_fields=["quantity", "updated_at"])
-        return allocations
-
-    sync_product_quantity(product)
+    # Yakuniy qoldiq = sotuvdan oldingi qoldiq − sotilgan miqdor (partiyalar
+    # yig'indisidan qayta hisoblanmaydi: 13 bo'lsa 13 sotilsa 0, 0−1 = −1).
+    product.quantity = before - qty
+    product.save(update_fields=["quantity", "updated_at"])
     return allocations
 
 
@@ -288,11 +287,14 @@ def restore_sale_allocations(sale) -> None:
         return
 
     items = list(sale.items.select_related("product").prefetch_related("batch_allocations"))
-    touched: dict = {}
+    add_back: dict = {}
 
     for item in items:
         allocs = list(item.batch_allocations.select_related("batch"))
         if allocs:
+            add_back[item.product_id] = add_back.get(item.product_id, ZERO) + _d(
+                item.quantity
+            )
             for alloc in allocs:
                 batch = StockBatch.objects.select_for_update().get(pk=alloc.batch_id)
                 batch.qty_remaining = _d(batch.qty_remaining) + _d(alloc.quantity)
@@ -308,7 +310,6 @@ def restore_sale_allocations(sale) -> None:
                     reference_type="sale",
                     reference_id=sale.id,
                 )
-                touched[product.pk] = product
         else:
             # Migratsiyadan oldingi sotuv — yangi adjustment partiya
             product = Product.objects.select_for_update().get(pk=item.product_id)
@@ -321,10 +322,11 @@ def restore_sale_allocations(sale) -> None:
                 note=f"Sotuv #{sale.receipt_number} bekor (eski yozuv)",
                 set_product_cost=False,
             )
-            touched[product.pk] = product
 
-    for product in touched.values():
-        sync_product_quantity(product)
+    for pid, qty in add_back.items():
+        product = Product.objects.select_for_update().get(pk=pid)
+        product.quantity = _d(product.quantity) + qty
+        product.save(update_fields=["quantity", "updated_at"])
 
 
 @transaction.atomic
@@ -373,6 +375,7 @@ def reverse_return_batches(sale_return) -> None:
             SaleReturnItemBatch.objects.select_related("batch").filter(return_item=item)
         )
         product = Product.objects.select_for_update().get(pk=item.product_id)
+        before = _d(product.quantity)
         if allocs:
             for alloc in allocs:
                 batch = StockBatch.objects.select_for_update().get(pk=alloc.batch_id)
@@ -402,7 +405,7 @@ def reverse_return_batches(sale_return) -> None:
                             need,
                             reference_type="return_cancel",
                             reference_id=sale_return.id,
-                            allow_negative=False,
+                            allow_negative=True,
                         )
         else:
             # Eski qaytarish — FIFO dan ayirish
@@ -411,9 +414,11 @@ def reverse_return_batches(sale_return) -> None:
                 _d(item.quantity),
                 reference_type="return_cancel",
                 reference_id=sale_return.id,
-                allow_negative=False,
+                allow_negative=True,
             )
-        sync_product_quantity(product)
+        product = Product.objects.select_for_update().get(pk=item.product_id)
+        product.quantity = before - _d(item.quantity)
+        product.save(update_fields=["quantity", "updated_at"])
 
 
 @transaction.atomic
@@ -443,6 +448,7 @@ def set_stock_absolute(
             source_id=audit_item.id if audit_item else None,
             note="Reviziya (+)",
             set_product_cost=False,
+            absorb_overdraft=False,
         )
     elif delta < ZERO:
         consume_fifo(

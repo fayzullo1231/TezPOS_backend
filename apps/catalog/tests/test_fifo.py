@@ -212,6 +212,54 @@ class FifoBatchTests(TestCase):
         self.product.refresh_from_db()
         self.assertEqual(self.product.quantity, _dec("15"))
 
+    def test_overdraft_then_receipt_then_sell_exact(self):
+        consume_fifo(self.product, _dec("10"), allow_negative=True)
+        self.product.refresh_from_db()
+        self.assertEqual(self.product.quantity, _dec("-10"))
+        create_batch(
+            self.product, _dec("23"), _dec("35000"), source_type=StockBatch.SOURCE_RECEIPT
+        )
+        self.product.refresh_from_db()
+        self.assertEqual(self.product.quantity, _dec("13"))
+        self.assertEqual(batch_remaining_sum(self.product), _dec("13"))
+        consume_fifo(self.product, _dec("13"), allow_negative=True)
+        self.product.refresh_from_db()
+        self.assertEqual(self.product.quantity, _dec("0"))
+
+    def test_sell_subtracts_exact_even_if_batches_differ(self):
+        create_batch(
+            self.product, _dec("23"), _dec("35000"), source_type=StockBatch.SOURCE_RECEIPT
+        )
+        Product.objects.filter(pk=self.product.pk).update(quantity=_dec("13"))
+        consume_fifo(self.product, _dec("13"), allow_negative=True)
+        self.product.refresh_from_db()
+        self.assertEqual(self.product.quantity, _dec("0"))
+        consume_fifo(self.product, _dec("2"), allow_negative=True)
+        self.product.refresh_from_db()
+        self.assertEqual(self.product.quantity, _dec("-2"))
+
+    def test_restore_overdraft_sale_adds_full_qty(self):
+        create_batch(
+            self.product, _dec("5"), _dec("10000"), source_type=StockBatch.SOURCE_RECEIPT
+        )
+        sale = Sale.objects.create(
+            tenant=self.tenant, user=self.user, status=Sale.STATUS_COMPLETED, receipt_number=1
+        )
+        item = SaleItem.objects.create(
+            sale=sale,
+            product=self.product,
+            product_name="MAXITO",
+            quantity=_dec("8"),
+            unit_price=_dec("1"),
+            total=_dec("8"),
+        )
+        consume_fifo(self.product, _dec("8"), sale_item=item, allow_negative=True)
+        self.product.refresh_from_db()
+        self.assertEqual(self.product.quantity, _dec("-3"))
+        restore_sale_allocations(sale)
+        self.product.refresh_from_db()
+        self.assertEqual(self.product.quantity, _dec("5"))
+
 
 @skipIf(connection.vendor == "sqlite", "Concurrent select_for_update needs Postgres")
 class FifoConcurrencyTests(TransactionTestCase):
