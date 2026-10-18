@@ -214,6 +214,13 @@ class StockReceipt(models.Model):
         (STATUS_COMPLETED, "Yakunlangan"),
     ]
 
+    PAYMENT_CASH = "cash"
+    PAYMENT_CREDIT = "credit"
+    PAYMENT_CHOICES = [
+        (PAYMENT_CASH, "Naqd"),
+        (PAYMENT_CREDIT, "Qarzga"),
+    ]
+
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     tenant = models.ForeignKey(Tenant, on_delete=models.CASCADE, related_name="stock_receipts")
     user = models.ForeignKey(
@@ -227,6 +234,9 @@ class StockReceipt(models.Model):
     currency = models.CharField(max_length=10, default="SUM")
     receipt_number = models.PositiveIntegerField(default=0, db_index=True)
     status = models.CharField(max_length=20, choices=STATUS_CHOICES, default=STATUS_COMPLETED)
+    payment_type = models.CharField(
+        max_length=20, choices=PAYMENT_CHOICES, default=PAYMENT_CASH, db_index=True
+    )
     price_list_ids = models.JSONField(default=list, blank=True)
     include_selling_price = models.BooleanField(default=True)
     total = models.DecimalField(max_digits=14, decimal_places=2, default=0)
@@ -255,6 +265,53 @@ class StockReceiptItem(models.Model):
     class Meta:
         verbose_name = "Kirim qatori"
         verbose_name_plural = "Kirim qatorlari"
+
+
+class SupplierReturn(models.Model):
+    """Yetkazib beruvchiga qaytarish — ombordan chiqim (qoldiq kamayadi)."""
+
+    STATUS_COMPLETED = "completed"
+    STATUS_CHOICES = [(STATUS_COMPLETED, "Yakunlangan")]
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    tenant = models.ForeignKey(Tenant, on_delete=models.CASCADE, related_name="supplier_returns")
+    user = models.ForeignKey(
+        "accounts.User", null=True, on_delete=models.SET_NULL, related_name="supplier_returns"
+    )
+    shift = models.ForeignKey(
+        "accounts.Shift", null=True, blank=True, on_delete=models.SET_NULL, related_name="supplier_returns"
+    )
+    supplier = models.ForeignKey(
+        Supplier, null=True, blank=True, on_delete=models.SET_NULL, related_name="supplier_returns"
+    )
+    supplier_name = models.CharField(max_length=200, blank=True)
+    return_number = models.PositiveIntegerField(default=0, db_index=True)
+    status = models.CharField(max_length=20, choices=STATUS_CHOICES, default=STATUS_COMPLETED)
+    total = models.DecimalField(max_digits=14, decimal_places=2, default=0)
+    comment = models.TextField(blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    completed_at = models.DateTimeField(null=True, blank=True)
+
+    class Meta:
+        ordering = ["-created_at"]
+        verbose_name = "Yetkazib beruvchiga qaytarish"
+        verbose_name_plural = "Yetkazib beruvchiga qaytarishlar"
+
+
+class SupplierReturnItem(models.Model):
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    supplier_return = models.ForeignKey(
+        SupplierReturn, on_delete=models.CASCADE, related_name="items"
+    )
+    product = models.ForeignKey(Product, on_delete=models.PROTECT, related_name="supplier_return_items")
+    product_name = models.CharField(max_length=300)
+    quantity = models.DecimalField(max_digits=14, decimal_places=3)
+    cost_price = models.DecimalField(max_digits=14, decimal_places=2, default=0)
+    line_total = models.DecimalField(max_digits=14, decimal_places=2, default=0)
+
+    class Meta:
+        verbose_name = "Qaytarish qatori"
+        verbose_name_plural = "Qaytarish qatorlari"
 
 
 class StockAudit(models.Model):
@@ -362,6 +419,7 @@ class StockMovement(models.Model):
     TYPE_RETURN_CANCEL = "return_cancel"
     TYPE_AUDIT = "audit"
     TYPE_ADJUSTMENT = "adjustment"
+    TYPE_SUPPLIER_RETURN = "supp_return"
     TYPE_CHOICES = [
         (TYPE_OPENING, "Boshlang'ich"),
         (TYPE_RECEIPT, "Kirim"),
@@ -371,6 +429,7 @@ class StockMovement(models.Model):
         (TYPE_RETURN_CANCEL, "Qaytarish bekor"),
         (TYPE_AUDIT, "Reviziya"),
         (TYPE_ADJUSTMENT, "Tuzatish"),
+        (TYPE_SUPPLIER_RETURN, "Yetkazib beruvchiga qaytarish"),
     ]
 
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)

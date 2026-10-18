@@ -13,6 +13,13 @@ class Tenant(models.Model):
     server_name = models.CharField(max_length=100, unique=True, db_index=True)
     display_name = models.CharField(max_length=200)
     is_active = models.BooleanField(default=True)
+    # Kassirga taklif — tasdiqlanmaguncha kassada "bor" deb yozilmaydi
+    default_opening_cash = models.DecimalField(
+        max_digits=14, decimal_places=2, default=0
+    )
+    default_opening_terminal = models.DecimalField(
+        max_digits=14, decimal_places=2, default=0
+    )
     created_at = models.DateTimeField(auto_now_add=True)
 
     class Meta:
@@ -95,6 +102,26 @@ class Shift(models.Model):
     status = models.CharField(max_length=10, choices=STATUS_CHOICES, default=STATUS_OPEN)
     opening_cash = models.DecimalField(max_digits=14, decimal_places=2, default=0)
     opening_terminal = models.DecimalField(max_digits=14, decimal_places=2, default=0)
+    closing_cash = models.DecimalField(
+        max_digits=14, decimal_places=2, null=True, blank=True
+    )
+    closing_terminal = models.DecimalField(
+        max_digits=14, decimal_places=2, null=True, blank=True
+    )
+    variance_cash = models.DecimalField(
+        max_digits=14, decimal_places=2, null=True, blank=True
+    )
+    variance_terminal = models.DecimalField(
+        max_digits=14, decimal_places=2, null=True, blank=True
+    )
+    variance_reason = models.CharField(max_length=500, blank=True, default="")
+    closed_by = models.ForeignKey(
+        User,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="closed_shifts",
+    )
 
     class Meta:
         ordering = ["-opened_at"]
@@ -120,6 +147,7 @@ class CashTransaction(models.Model):
     ]
 
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    client_id = models.CharField(max_length=64, blank=True, db_index=True)
     tenant = models.ForeignKey(Tenant, on_delete=models.CASCADE, related_name="cash_transactions")
     user = models.ForeignKey(User, on_delete=models.SET_NULL, null=True, related_name="cash_transactions")
     shift = models.ForeignKey(Shift, on_delete=models.SET_NULL, null=True, blank=True)

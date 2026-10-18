@@ -234,6 +234,8 @@ class CashTransactionCreateSerializer(serializers.Serializer):
     )
     party_name = serializers.CharField(max_length=200, required=False, allow_blank=True)
     occurred_at = serializers.DateTimeField(required=False)
+    client_id = serializers.CharField(max_length=64, required=False, allow_blank=True)
+    require_open_shift = serializers.BooleanField(required=False, default=True)
 
     def validate_occurred_at(self, value):
         if value is None:
@@ -279,6 +281,25 @@ class CashTransactionCreateSerializer(serializers.Serializer):
             validated_data.get("category") or "",
         )
 
+        client_id = (validated_data.get("client_id") or "").strip()
+        if client_id:
+            existing = CashTransaction.objects.filter(
+                tenant=tenant, client_id=client_id
+            ).first()
+            if existing:
+                return existing
+
+        shift = (
+            request.user.shifts.filter(status=Shift.STATUS_OPEN)
+            .order_by("-opened_at")
+            .first()
+        )
+        require_shift = validated_data.get("require_open_shift", True)
+        if require_shift and not shift:
+            raise serializers.ValidationError(
+                {"detail": "Ochiq smena yo'q. Avval smenani oching."}
+            )
+
         last = (
             CashTransaction.objects.filter(tenant=tenant)
             .order_by("-number")
@@ -287,12 +308,6 @@ class CashTransactionCreateSerializer(serializers.Serializer):
         )
         number = (last or 100000) + 1
 
-        shift = (
-            request.user.shifts.filter(status=Shift.STATUS_OPEN)
-            .order_by("-opened_at")
-            .first()
-        )
-
         occurred_at = validated_data.get("occurred_at") or timezone.now()
 
         return CashTransaction.objects.create(
@@ -300,6 +315,7 @@ class CashTransactionCreateSerializer(serializers.Serializer):
             user=request.user,
             shift=shift,
             number=number,
+            client_id=client_id,
             transaction_type=tx_type,
             category=category,
             amount=validated_data["amount"],
@@ -312,8 +328,31 @@ class CashTransactionCreateSerializer(serializers.Serializer):
 
 
 class ShiftOpenSerializer(serializers.Serializer):
-    opening_cash = serializers.DecimalField(max_digits=14, decimal_places=2, default=0)
-    opening_terminal = serializers.DecimalField(max_digits=14, decimal_places=2, default=0)
+    opening_cash = serializers.DecimalField(
+        max_digits=14, decimal_places=2, required=False, default=Decimal("0")
+    )
+    opening_terminal = serializers.DecimalField(
+        max_digits=14, decimal_places=2, required=False, default=Decimal("0")
+    )
+    confirm_opening = serializers.BooleanField(required=False, default=False)
+
+
+class ShiftCloseSerializer(serializers.Serializer):
+    closing_cash = serializers.DecimalField(
+        max_digits=14, decimal_places=2, required=False, allow_null=True
+    )
+    closing_terminal = serializers.DecimalField(
+        max_digits=14, decimal_places=2, required=False, allow_null=True
+    )
+    actual_cash = serializers.DecimalField(
+        max_digits=14, decimal_places=2, required=False, allow_null=True
+    )
+    actual_terminal = serializers.DecimalField(
+        max_digits=14, decimal_places=2, required=False, allow_null=True
+    )
+    variance_reason = serializers.CharField(
+        max_length=500, required=False, allow_blank=True, default=""
+    )
 
 
 class ShiftSerializer(serializers.ModelSerializer):
@@ -326,5 +365,20 @@ class ShiftSerializer(serializers.ModelSerializer):
             "status",
             "opening_cash",
             "opening_terminal",
+            "closing_cash",
+            "closing_terminal",
+            "variance_cash",
+            "variance_terminal",
+            "variance_reason",
         ]
-        read_only_fields = ["id", "opened_at", "closed_at", "status"]
+        read_only_fields = [
+            "id",
+            "opened_at",
+            "closed_at",
+            "status",
+            "closing_cash",
+            "closing_terminal",
+            "variance_cash",
+            "variance_terminal",
+            "variance_reason",
+        ]

@@ -51,6 +51,9 @@ class StockReceiptCreateSerializer(serializers.Serializer):
     supplier_name = serializers.CharField(max_length=200, required=False, allow_blank=True)
     warehouse = serializers.CharField(max_length=120, default="Asosiy")
     currency = serializers.CharField(max_length=10, default="SUM")
+    payment_type = serializers.ChoiceField(
+        choices=["cash", "credit"], required=False, default="cash"
+    )
     price_list_ids = serializers.ListField(
         child=serializers.UUIDField(), required=False, default=list
     )
@@ -73,6 +76,9 @@ class StockReceiptCreateSerializer(serializers.Serializer):
         include_selling = validated_data.pop("include_selling_price", True)
         supplier_id = validated_data.pop("supplier_id", None)
         supplier_name = (validated_data.pop("supplier_name", "") or "").strip()
+        payment_type = (validated_data.pop("payment_type", None) or "cash").strip().lower()
+        if payment_type not in ("cash", "credit"):
+            payment_type = "cash"
 
         supplier = None
         if supplier_id:
@@ -98,6 +104,7 @@ class StockReceiptCreateSerializer(serializers.Serializer):
                 currency=validated_data.get("currency") or "SUM",
                 receipt_number=receipt_number,
                 status=StockReceipt.STATUS_COMPLETED,
+                payment_type=payment_type,
                 price_list_ids=price_list_ids,
                 include_selling_price=include_selling,
                 completed_at=timezone.now(),
@@ -224,6 +231,7 @@ class StockReceiptReadSerializer(serializers.ModelSerializer):
             "warehouse",
             "currency",
             "status",
+            "payment_type",
             "price_list_ids",
             "include_selling_price",
             "total",

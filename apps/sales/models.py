@@ -31,6 +31,7 @@ class CustomerDebtPayment(models.Model):
     ]
 
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    client_id = models.CharField(max_length=64, blank=True, db_index=True)
     tenant = models.ForeignKey(
         Tenant, on_delete=models.CASCADE, related_name="debt_payments"
     )
@@ -39,6 +40,13 @@ class CustomerDebtPayment(models.Model):
     )
     user = models.ForeignKey(
         User, on_delete=models.SET_NULL, null=True, blank=True, related_name="debt_payments"
+    )
+    shift = models.ForeignKey(
+        Shift,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="debt_payments",
     )
     amount = models.DecimalField(max_digits=14, decimal_places=2)
     payment_type = models.CharField(

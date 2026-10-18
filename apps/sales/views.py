@@ -65,8 +65,36 @@ class CustomerViewSet(viewsets.ModelViewSet):
         if payment_type not in ("cash", "card"):
             payment_type = "cash"
         note = str(request.data.get("note") or "").strip()[:255]
+        client_id = str(request.data.get("client_id") or "").strip()[:64]
 
         with transaction.atomic():
+            if client_id:
+                existing = CustomerDebtPayment.objects.filter(
+                    tenant=tenant, client_id=client_id
+                ).first()
+                if existing:
+                    return Response(
+                        {
+                            "id": str(existing.id),
+                            "receipt_number": existing.receipt_number,
+                            "paid": str(existing.amount),
+                            "debt_delta": str(-existing.amount),
+                            "balance": str(existing.balance_after),
+                            "payment_type": existing.payment_type,
+                            "kind": "sub",
+                            "idempotent": True,
+                            "customer": {
+                                "id": str(existing.customer_id),
+                                "name": existing.customer.name,
+                                "phone": existing.customer.phone or "",
+                                "debt": str(existing.customer.debt),
+                            },
+                            "created_at": existing.created_at.isoformat()
+                            if existing.created_at
+                            else None,
+                        }
+                    )
+
             customer = (
                 Customer.objects.select_for_update()
                 .filter(pk=pk, tenant=tenant)
@@ -85,6 +113,12 @@ class CustomerViewSet(viewsets.ModelViewSet):
             paid = min(amount, current)
             balance = apply_customer_debt_delta(customer, -paid)
 
+            open_shift = (
+                request.user.shifts.filter(status="open")
+                .order_by("-opened_at")
+                .first()
+            )
+
             last = (
                 CustomerDebtPayment.objects.filter(tenant=tenant)
                 .order_by("-receipt_number")
@@ -96,6 +130,8 @@ class CustomerViewSet(viewsets.ModelViewSet):
                 tenant=tenant,
                 customer=customer,
                 user=request.user,
+                shift=open_shift,
+                client_id=client_id,
                 amount=paid,
                 payment_type=payment_type,
                 note=note,

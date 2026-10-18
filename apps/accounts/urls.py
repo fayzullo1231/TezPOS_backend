@@ -1,6 +1,11 @@
 from django.urls import path
 
-from .cash_views import CashLedgerView, CashSummaryView, CashTransactionCreateView
+from .cash_views import (
+    CashLedgerView,
+    CashQuickCategoriesView,
+    CashSummaryView,
+    CashTransactionCreateView,
+)
 from .tenant_reset_views import TenantResetView
 from .views import (
     HealthView,
@@ -13,6 +18,7 @@ from .views import (
     ShiftOpenView,
     ShiftPreviewView,
     EmployeeListCreateView,
+    EmployeePayInfoView,
     TenantCreateView,
     TenantInfoView,
     TenantStaffDetailView,
@@ -30,6 +36,7 @@ urlpatterns = [
     path("staff/", TenantStaffListView.as_view()),
     path("staff/<uuid:user_id>/", TenantStaffDetailView.as_view()),
     path("employees/", EmployeeListCreateView.as_view()),
+    path("employees/<uuid:employee_id>/pay-info/", EmployeePayInfoView.as_view()),
     path("shift/preview/", ShiftPreviewView.as_view()),
     path("shift/open/", ShiftOpenView.as_view()),
     path("shift/close/", ShiftCloseView.as_view()),
@@ -38,4 +45,5 @@ urlpatterns = [
     path("cash/ledger/", CashLedgerView.as_view()),
     path("cash/summary/", CashSummaryView.as_view()),
     path("cash/transactions/", CashTransactionCreateView.as_view()),
+    path("cash/quick-categories/", CashQuickCategoriesView.as_view()),
 ]

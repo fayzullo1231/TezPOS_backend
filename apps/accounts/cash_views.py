@@ -395,6 +395,32 @@ class CashSummaryView(APIView):
         )
 
 
+QUICK_EXPENSE_CATEGORIES = [
+    {"id": "paket", "label": "Paket"},
+    {"id": "transport", "label": "Transport"},
+    {"id": "tozalash", "label": "Tozalash"},
+    {"id": "oylik", "label": "Oylik / avans"},
+    {"id": "yetkazuvchi", "label": "Yetkazib beruvchi"},
+    {"id": "boshqa", "label": "Boshqa xarajat"},
+]
+
+
+class CashQuickCategoriesView(APIView):
+    """Kassir tezkor xarajat tugmalari."""
+
+    def get(self, request):
+        return Response(
+            {
+                "expense": QUICK_EXPENSE_CATEGORIES,
+                "income": [
+                    {"id": "kirim", "label": "Kirim"},
+                    {"id": "qarz", "label": "Qarz undirish (kassa)"},
+                ],
+                "default_payment_method": "cash",
+            }
+        )
+
+
 class CashTransactionCreateView(APIView):
     def post(self, request):
         serializer = CashTransactionCreateSerializer(
