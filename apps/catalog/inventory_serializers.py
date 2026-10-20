@@ -52,7 +52,7 @@ class StockReceiptCreateSerializer(serializers.Serializer):
     warehouse = serializers.CharField(max_length=120, default="Asosiy")
     currency = serializers.CharField(max_length=10, default="SUM")
     payment_type = serializers.ChoiceField(
-        choices=["cash", "credit"], required=False, default="cash"
+        choices=["cash", "credit", "bonus"], required=False, default="cash"
     )
     price_list_ids = serializers.ListField(
         child=serializers.UUIDField(), required=False, default=list
@@ -77,8 +77,9 @@ class StockReceiptCreateSerializer(serializers.Serializer):
         supplier_id = validated_data.pop("supplier_id", None)
         supplier_name = (validated_data.pop("supplier_name", "") or "").strip()
         payment_type = (validated_data.pop("payment_type", None) or "cash").strip().lower()
-        if payment_type not in ("cash", "credit"):
+        if payment_type not in ("cash", "credit", "bonus"):
             payment_type = "cash"
+        is_bonus = payment_type == StockReceipt.PAYMENT_BONUS
 
         supplier = None
         if supplier_id:
@@ -139,7 +140,8 @@ class StockReceiptCreateSerializer(serializers.Serializer):
                     id=row["product_id"], tenant=tenant
                 )
                 qty = Decimal(str(row["quantity"]))
-                cost = Decimal(str(row["cost_price"]))
+                # Bonus: tekin kelgan mol — tannarx 0, sotilgan pul to'liq foyda
+                cost = Decimal("0") if is_bonus else Decimal(str(row["cost_price"]))
                 sale = Decimal(str(row.get("sale_price") or 0))
                 list_prices_raw = row.get("list_prices") or {}
                 list_prices = {
@@ -171,8 +173,12 @@ class StockReceiptCreateSerializer(serializers.Serializer):
                     source_id=receipt_item.id,
                     receipt_item=receipt_item,
                     received_at=receipt.completed_at,
-                    note=f"Kirim #{receipt.receipt_number}",
-                    set_product_cost=True,
+                    note=(
+                        f"Bonus kirim #{receipt.receipt_number}"
+                        if is_bonus
+                        else f"Kirim #{receipt.receipt_number}"
+                    ),
+                    set_product_cost=not is_bonus,
                 )
                 if include_selling and sale > 0:
                     product.price = sale

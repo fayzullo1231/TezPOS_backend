@@ -107,8 +107,10 @@ def compute_shift_summary(shift: Shift, *, floor_zero: bool = True) -> dict:
         cash_returns += c
         card_returns += t
 
-    # Qarz undirish (eski yoki yangi qarz — shu smenada to'langan)
-    debt_pay_qs = CustomerDebtPayment.objects.filter(shift=shift, tenant=tenant)
+    # Qarz undirish (shu smenada to'langan). [qarz+] — qo'shish, undirish emas.
+    debt_pay_qs = CustomerDebtPayment.objects.filter(
+        shift=shift, tenant=tenant
+    ).exclude(note__startswith="[qarz+]")
     debt_collections_count = debt_pay_qs.count()
     debt_collections_cash = _dec(
         debt_pay_qs.filter(payment_type=CustomerDebtPayment.PAYMENT_CASH).aggregate(

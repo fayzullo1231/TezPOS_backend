@@ -304,10 +304,16 @@ class ShiftCurrentView(APIView):
         ).first()
         if not shift:
             return Response({"shift": None, "summary": None})
+        # lite=1 — faqat ochiq/yopiq holat (header poll), og'ir summary yo'q
+        lite = str(request.query_params.get("lite") or "").lower() in (
+            "1",
+            "true",
+            "yes",
+        )
         return Response(
             {
                 "shift": ShiftSerializer(shift).data,
-                "summary": compute_shift_summary(shift),
+                "summary": None if lite else compute_shift_summary(shift),
             }
         )
 

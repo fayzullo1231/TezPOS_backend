@@ -7,7 +7,7 @@ from rest_framework import serializers
 from apps.catalog.fifo import InsufficientStockError, consume_fifo, stock_snapshot
 from apps.catalog.models import Product
 
-from .debt_utils import resolve_customer
+from .debt_utils import apply_customer_debt_delta, resolve_customer
 from .models import Customer, Sale, SaleItem, SaleItemBatch
 
 
@@ -179,6 +179,43 @@ class SaleSerializer(serializers.ModelSerializer):
                 .first()
             )
             receipt_number = (last or 0) + 1
+
+            # Bo'sh savat + credit: saytdan qarz qo'shish (nasiyaga savdo)
+            if not items_data:
+                pt = validated_data.get("payment_type") or Sale.PAYMENT_CASH
+                debt = Decimal(str(validated_data.get("debt_amount") or 0))
+                if pt == Sale.PAYMENT_CREDIT and debt > 0:
+                    for drop in (
+                        "subtotal",
+                        "total",
+                        "paid_amount",
+                        "debt_amount",
+                        "discount_amount",
+                    ):
+                        validated_data.pop(drop, None)
+                    sale = Sale.objects.create(
+                        tenant=tenant,
+                        user=user,
+                        shift=shift,
+                        receipt_number=receipt_number,
+                        subtotal=debt,
+                        discount_amount=Decimal("0"),
+                        total=debt,
+                        paid_amount=Decimal("0"),
+                        debt_amount=debt,
+                        payment_type=Sale.PAYMENT_CREDIT,
+                        status=validated_data.get("status") or Sale.STATUS_COMPLETED,
+                        completed_at=timezone.now(),
+                        synced_at=timezone.now(),
+                        **validated_data,
+                    )
+                    if sale.customer_id:
+                        apply_customer_debt_delta(sale.customer, debt)
+                    sale._stock_updates = []
+                    return sale
+                raise serializers.ValidationError(
+                    {"items": "Kamida bitta mahsulot kerak."}
+                )
 
             sale = Sale.objects.create(
                 tenant=tenant,

@@ -221,6 +221,11 @@ class CustomerViewSet(viewsets.ModelViewSet):
                 if not note_out.startswith("[qarz+]"):
                     note_out = f"[qarz+] {note_out}"[:255]
 
+            open_shift = (
+                request.user.shifts.filter(status="open")
+                .order_by("-opened_at")
+                .first()
+            )
             last = (
                 CustomerDebtPayment.objects.filter(tenant=tenant)
                 .order_by("-receipt_number")
@@ -228,10 +233,12 @@ class CustomerViewSet(viewsets.ModelViewSet):
                 .first()
             )
             receipt_number = (last or 0) + 1
+            # To'lov (sub) — smenaga yoziladi → "Nasiya undirildi"
             payment = CustomerDebtPayment.objects.create(
                 tenant=tenant,
                 customer=customer,
                 user=request.user,
+                shift=open_shift if kind == "sub" else None,
                 amount=store_amount,
                 payment_type=payment_type,
                 note=note_out,

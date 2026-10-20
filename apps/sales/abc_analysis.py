@@ -11,13 +11,13 @@ from datetime import datetime, timedelta
 from decimal import Decimal, InvalidOperation
 from typing import Any
 
-from django.db.models import F, Q, Sum
+from django.db.models import Case, DecimalField, ExpressionWrapper, F, Q, Sum, Value, When
 from django.utils import timezone
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
 from apps.catalog.models import PriceList, Product, ProductPrice
-from apps.sales.models import Sale, SaleItem, SaleItemBatch
+from apps.sales.models import Sale, SaleItem, SaleItemBatch, SaleReturn, SaleReturnItem
 
 ZERO = Decimal("0")
 Q2 = Decimal("0.01")
@@ -224,7 +224,7 @@ def build_loss_checks(
             product_id__in=product_ids,
         )
         .select_related("sale", "product")
-        .prefetch_related("batch_allocations")
+        .prefetch_related("batch_allocations__batch__receipt_item__receipt")
         .order_by("sale__completed_at", "sale__receipt_number")
     )
     out: dict[str, list[dict]] = defaultdict(list)
@@ -242,12 +242,23 @@ def build_loss_checks(
             continue
         qty = _d(item.quantity, Q3)
         sales = _d(item.total)
+        s_sub = _d(item.sale.subtotal)
+        if s_sub > 0:
+            sales = (sales * _d(item.sale.total) / s_sub).quantize(Q2)
+        pc = _d(getattr(item.product, "cost_price", 0))
         cost = ZERO
+        aq = ZERO
         for alloc in item.batch_allocations.all():
-            cost += _d(alloc.quantity, Q3) * _d(alloc.unit_cost)
+            a_qty = _d(alloc.quantity, Q3)
+            uc = _d(alloc.unit_cost)
+            if uc <= 0:
+                rc = getattr(getattr(getattr(alloc, "batch", None), "receipt_item", None), "receipt", None)
+                uc = ZERO if getattr(rc, "payment_type", "") == "bonus" else pc
+            cost += a_qty * uc
+            aq += a_qty
+        if qty > aq:
+            cost += (qty - aq) * pc
         cost = cost.quantize(Q2)
-        if cost == 0 and qty > 0:
-            cost = (_d(getattr(item.product, "cost_price", 0)) * qty).quantize(Q2)
         profit = sales - cost
         if profit >= 0:
             continue
@@ -307,6 +318,31 @@ def build_abc_payload(
         sale__completed_at__date__lte=date_to,
     )
 
+    DEC = DecimalField(max_digits=24, decimal_places=6)
+
+    def net_line(prefix: str):
+        # Chek chegirmasi (discount_amount) qatorlarga proporsional taqsimlanadi
+        return Case(
+            When(
+                **{f"{prefix}subtotal__gt": 0},
+                then=ExpressionWrapper(
+                    F("total") * F(f"{prefix}total") / F(f"{prefix}subtotal"),
+                    output_field=DEC,
+                ),
+            ),
+            default=F("total"),
+            output_field=DEC,
+        )
+
+    def eff_unit_cost(product_path: str):
+        # 0 tannarxli partiya: bonus kirim bo'lsa 0 (to'liq foyda), aks holda mahsulot tannarxi
+        return Case(
+            When(unit_cost__gt=0, then=F("unit_cost")),
+            When(batch__receipt_item__receipt__payment_type="bonus", then=Value(ZERO)),
+            default=F(f"{product_path}__cost_price"),
+            output_field=DEC,
+        )
+
     sales_rows = (
         SaleItem.objects.filter(base_sale)
         .values(
@@ -320,7 +356,7 @@ def build_abc_payload(
             "unit_price",
             "sale__price_list_id",
         )
-        .annotate(qty=Sum("quantity"), revenue=Sum("total"))
+        .annotate(qty=Sum("quantity"), revenue=Sum(net_line("sale__")))
     )
 
     cost_base = Q(
@@ -335,25 +371,71 @@ def build_abc_payload(
             "sale_item__product_id",
             "sale_item__unit_price",
             "sale_item__sale__price_list_id",
-            "sale_item__product__price",
         )
-        .annotate(cost=Sum(F("quantity") * F("unit_cost")))
+        .annotate(
+            aq=Sum("quantity"),
+            cost=Sum(
+                ExpressionWrapper(
+                    F("quantity") * eff_unit_cost("sale_item__product"), output_field=DEC
+                )
+            ),
+        )
     )
 
-    cost_map: dict[tuple[str, str], Decimal] = defaultdict(lambda: ZERO)
+    def ckey(pid, unit_price, plid) -> tuple:
+        return (str(pid), str(_d(unit_price)), str(plid or ""))
+
+    cost_map: dict[tuple, tuple[Decimal, Decimal]] = {}
     for r in cost_rows:
-        pid = str(r["sale_item__product_id"])
-        ch = classify_channel(
-            unit_price=r["sale_item__unit_price"],
-            selling_price=r["sale_item__product__price"],
-            wholesale_prices=wh_by_product.get(pid, []),
-            price_list_id=r["sale_item__sale__price_list_id"],
-            selling_ids=selling_ids,
-            wholesale_ids=wholesale_ids,
+        k = ckey(
+            r["sale_item__product_id"],
+            r["sale_item__unit_price"],
+            r["sale_item__sale__price_list_id"],
         )
-        cost_map[(pid, ch)] += _d(r["cost"])
+        aq0, c0 = cost_map.get(k, (ZERO, ZERO))
+        cost_map[k] = (aq0 + _d(r["aq"], Q3), c0 + _d(r["cost"]))
 
     products: dict[str, dict] = {}
+
+    def ensure(pid: str, meta: dict) -> dict:
+        p = products.get(pid)
+        if p:
+            return p
+        p = {
+            "product_id": pid,
+            "name": meta.get("name") or "",
+            "barcode": meta.get("barcode") or "",
+            "category_id": str(meta.get("category_id") or "") or None,
+            "category": meta.get("category") or "",
+            "qty": ZERO,
+            "retail_qty": ZERO,
+            "wholesale_qty": ZERO,
+            "retail_sales": ZERO,
+            "wholesale_sales": ZERO,
+            "retail_cost": ZERO,
+            "wholesale_cost": ZERO,
+            "retail_profit": ZERO,
+            "wholesale_profit": ZERO,
+            "sales": ZERO,
+            "cost": ZERO,
+            "profit": ZERO,
+        }
+        products[pid] = p
+        return p
+
+    def add(p: dict, ch: str, qty: Decimal, rev: Decimal, cost: Decimal) -> None:
+        p["qty"] += qty
+        p["sales"] += rev
+        p["cost"] += cost
+        if ch == "retail":
+            p["retail_qty"] += qty
+            p["retail_sales"] += rev
+            p["retail_cost"] += cost
+        else:
+            p["wholesale_qty"] += qty
+            p["wholesale_sales"] += rev
+            p["wholesale_cost"] += cost
+
     for r in sales_rows:
         pid = str(r["product_id"])
         ch = classify_channel(
@@ -369,63 +451,77 @@ def build_abc_payload(
 
         qty = _d(r["qty"], Q3)
         rev = _d(r["revenue"])
-        # Cost shu kanal uchun umumiy — bir nechta unit_price bo'lsa proporsional emas,
-        # lekin keyinroq qayta taqsimlash: avval to'liq costni bir marta olamiz.
-        p = products.get(pid)
-        if not p:
-            p = {
-                "product_id": pid,
-                "name": r.get("product__name") or "",
-                "barcode": r.get("product__barcode") or "",
-                "category_id": str(r["product__category_id"] or "") or None,
-                "category": r.get("product__category__name") or "",
-                "cost_price": _d(r.get("product__cost_price")),
-                "qty": ZERO,
-                "retail_qty": ZERO,
-                "wholesale_qty": ZERO,
-                "retail_sales": ZERO,
-                "wholesale_sales": ZERO,
-                "retail_cost": ZERO,
-                "wholesale_cost": ZERO,
-                "retail_profit": ZERO,
-                "wholesale_profit": ZERO,
-                "sales": ZERO,
-                "cost": ZERO,
-                "profit": ZERO,
-                "_retail_rev_for_cost": ZERO,
-                "_wh_rev_for_cost": ZERO,
-            }
-            products[pid] = p
+        aq, alloc_cost = cost_map.get(
+            ckey(pid, r["unit_price"], r["sale__price_list_id"]), (ZERO, ZERO)
+        )
+        # Partiyasiz sotilgan qism (minus qoldiq / eski sotuv) — mahsulot tannarxi bilan
+        missing = qty - aq
+        cost = alloc_cost
+        if missing > 0:
+            cost += missing * _d(r.get("product__cost_price"))
+        p = ensure(
+            pid,
+            {
+                "name": r.get("product__name"),
+                "barcode": r.get("product__barcode"),
+                "category_id": r.get("product__category_id"),
+                "category": r.get("product__category__name"),
+            },
+        )
+        add(p, ch, qty, rev, cost.quantize(Q2))
 
-        p["qty"] += qty
-        p["sales"] += rev
-        if ch == "retail":
-            p["retail_qty"] += qty
-            p["retail_sales"] += rev
-            p["_retail_rev_for_cost"] += rev
-        else:
-            p["wholesale_qty"] += qty
-            p["wholesale_sales"] += rev
-            p["_wh_rev_for_cost"] += rev
+    # Qaytarishlar — savdo, dona va tannarxdan ayiriladi
+    ret_rows = (
+        SaleReturnItem.objects.filter(
+            sale_return__tenant=tenant,
+            sale_return__status=SaleReturn.STATUS_COMPLETED,
+            sale_return__completed_at__date__gte=date_from,
+            sale_return__completed_at__date__lte=date_to,
+        )
+        .values(
+            "product_id",
+            "product__name",
+            "product__barcode",
+            "product__category_id",
+            "product__category__name",
+            "product__cost_price",
+            "product__price",
+            "unit_price",
+        )
+        .annotate(qty=Sum("quantity"), revenue=Sum(net_line("sale_return__")))
+    )
+    for r in ret_rows:
+        pid = str(r["product_id"])
+        ch = classify_channel(
+            unit_price=r["unit_price"],
+            selling_price=r["product__price"],
+            wholesale_prices=wh_by_product.get(pid, []),
+            price_list_id="",
+            selling_ids=selling_ids,
+            wholesale_ids=wholesale_ids,
+        )
+        if channel != "all" and ch != channel:
+            continue
+        qty = _d(r["qty"], Q3)
+        rev = _d(r["revenue"])
+        cost = (qty * _d(r.get("product__cost_price"))).quantize(Q2)
+        p = ensure(
+            pid,
+            {
+                "name": r.get("product__name"),
+                "barcode": r.get("product__barcode"),
+                "category_id": r.get("product__category_id"),
+                "category": r.get("product__category__name"),
+            },
+        )
+        add(p, ch, -qty, -rev, -cost)
 
-    # Cost: kanal bo'yicha FIFO; yo'qsa cost_price * qty
     for pid, p in products.items():
-        r_cost = cost_map.get((pid, "retail"), ZERO)
-        w_cost = cost_map.get((pid, "wholesale"), ZERO)
-        if r_cost == 0 and p["retail_qty"] > 0:
-            r_cost = (p["cost_price"] * p["retail_qty"]).quantize(Q2)
-        if w_cost == 0 and p["wholesale_qty"] > 0:
-            w_cost = (p["cost_price"] * p["wholesale_qty"]).quantize(Q2)
-
-        p["retail_cost"] = r_cost
-        p["wholesale_cost"] = w_cost
-        p["cost"] = r_cost + w_cost
-        p["retail_profit"] = p["retail_sales"] - r_cost
-        p["wholesale_profit"] = p["wholesale_sales"] - w_cost
+        for k in ("sales", "cost", "retail_sales", "retail_cost", "wholesale_sales", "wholesale_cost"):
+            p[k] = _d(p[k]).quantize(Q2)
+        p["retail_profit"] = p["retail_sales"] - p["retail_cost"]
+        p["wholesale_profit"] = p["wholesale_sales"] - p["wholesale_cost"]
         p["profit"] = p["sales"] - p["cost"]
-        p.pop("cost_price", None)
-        p.pop("_retail_rev_for_cost", None)
-        p.pop("_wh_rev_for_cost", None)
 
     # Katalogdagi barcha faol mahsulotlar (shu davrda sotilmaganlar ham — C guruh)
     if channel == "all":

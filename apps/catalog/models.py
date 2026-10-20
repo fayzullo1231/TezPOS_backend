@@ -216,9 +216,11 @@ class StockReceipt(models.Model):
 
     PAYMENT_CASH = "cash"
     PAYMENT_CREDIT = "credit"
+    PAYMENT_BONUS = "bonus"
     PAYMENT_CHOICES = [
         (PAYMENT_CASH, "Naqd"),
         (PAYMENT_CREDIT, "Qarzga"),
+        (PAYMENT_BONUS, "Bonus"),
     ]
 
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
