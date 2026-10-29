@@ -202,6 +202,12 @@ class ProductAdmin(admin.ModelAdmin):
     search_fields = ["name", "barcode", "barcodes__code"]
     inlines = [ProductBarcodeInline, ProductImageInline]
 
+    def get_queryset(self, request):
+        qs = super().get_queryset(request)
+        if request.GET.get("show") == "all":
+            return qs
+        return qs.filter(is_active=True)
+
     def get_form(self, request, obj=None, change=False, **kwargs):
         tenant = _tenant_for_admin(request, obj)
         kwargs["form"] = _build_product_admin_form(tenant, obj)
