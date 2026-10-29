@@ -249,6 +249,17 @@ class ProductAdmin(admin.ModelAdmin):
     def barcode_count(self, obj):
         return str(obj.barcodes.count())
 
+    def delete_model(self, request, obj):
+        from apps.catalog.barcode_lookup import retire_product
+
+        retire_product(obj)
+
+    def delete_queryset(self, request, queryset):
+        from apps.catalog.barcode_lookup import retire_product
+
+        for product in queryset:
+            retire_product(product)
+
     def save_formset(self, request, form, formset, change):
         instances = formset.save(commit=False)
         product = form.instance

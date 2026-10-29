@@ -1,5 +1,6 @@
 from decimal import Decimal, InvalidOperation
 
+from django.db import IntegrityError
 from rest_framework import serializers
 
 from .barcode_lookup import normalize_barcode, sync_product_barcodes
@@ -86,9 +87,13 @@ def product_list_prices_dict(instance) -> dict[str, str]:
 def product_image_url(image_field, request) -> str | None:
     if not image_field:
         return None
+    try:
+        url = image_field.url
+    except (ValueError, OSError):
+        return None
     if request:
-        return request.build_absolute_uri(image_field.url)
-    return image_field.url
+        return request.build_absolute_uri(url)
+    return url
 
 
 def product_images_payload(product, request) -> list[dict]:
@@ -110,10 +115,12 @@ def product_primary_image_url(product, request) -> str | None:
     images = list(product.images.all())
     primary = next((row for row in images if row.is_primary), None)
     if primary is None and images:
-        primary = min(
-            images,
-            key=lambda row: (row.sort_order, getattr(row, "created_at", None) or 0),
-        )
+        def _image_key(row):
+            created = getattr(row, "created_at", None)
+            stamp = created.timestamp() if hasattr(created, "timestamp") else 0
+            return (row.sort_order if row.sort_order is not None else 0, stamp)
+
+        primary = min(images, key=_image_key)
     if primary and primary.image:
         return product_image_url(primary.image, request)
     return product_image_url(product.image, request)
@@ -199,8 +206,20 @@ class ProductSerializer(serializers.ModelSerializer):
 
     def get_unit_is_weighable(self, obj):
         if obj.unit_ref_id:
-            return obj.unit_ref.is_weighable
-        return obj.unit.lower() in {"kg", "кг", "kilogramm", "kilogram", "g", "gr", "gramm", "грамм"}
+            try:
+                return obj.unit_ref.is_weighable
+            except obj.__class__.unit_ref.RelatedObjectDoesNotExist:
+                pass
+        return (obj.unit or "").lower() in {
+            "kg",
+            "кг",
+            "kilogramm",
+            "kilogram",
+            "g",
+            "gr",
+            "gramm",
+            "грамм",
+        }
 
     def to_representation(self, instance):
         data = super().to_representation(instance)
@@ -440,6 +459,10 @@ class ProductSerializer(serializers.ModelSerializer):
                 sync_product_barcodes(product, barcodes)
             except ValueError as exc:
                 raise serializers.ValidationError({"barcodes": str(exc)}) from exc
+            except IntegrityError as exc:
+                raise serializers.ValidationError(
+                    {"barcodes": "Bu shtrix kod boshqa mahsulotda bor."}
+                ) from exc
         if list_prices is not None:
             self._sync_list_prices(product, list_prices)
         if image:
@@ -480,8 +503,20 @@ class ProductListSerializer(serializers.ModelSerializer):
 
     def get_unit_is_weighable(self, obj):
         if obj.unit_ref_id:
-            return obj.unit_ref.is_weighable
-        return obj.unit.lower() in {"kg", "кг", "kilogramm", "kilogram", "g", "gr", "gramm", "грамм"}
+            try:
+                return obj.unit_ref.is_weighable
+            except obj.__class__.unit_ref.RelatedObjectDoesNotExist:
+                pass
+        return (obj.unit or "").lower() in {
+            "kg",
+            "кг",
+            "kilogramm",
+            "kilogram",
+            "g",
+            "gr",
+            "gramm",
+            "грамм",
+        }
 
     def get_image_url(self, obj):
         request = self.context.get("request")

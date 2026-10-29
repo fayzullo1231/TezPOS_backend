@@ -186,18 +186,10 @@ class ProductViewSet(TenantMixin, viewsets.ModelViewSet):
         return qs.filter(is_active=True)
 
     def perform_destroy(self, instance):
-        """Sotuvda ishlatilgan mahsulot — yumshoq o'chirish; aks holda bazadan o'chirish."""
-        from apps.catalog.barcode_lookup import release_product_barcodes
-        from apps.sales.models import SaleItem
+        """Sotuv yoki kirimda ishlatilgan mahsulot yashiriladi, qolgani o'chiriladi."""
+        from apps.catalog.barcode_lookup import retire_product
 
-        # Shtrix kodlar boshqa mahsulotga o'tishi uchun bo'shatiladi
-        release_product_barcodes(instance)
-
-        if SaleItem.objects.filter(product=instance).exists():
-            instance.is_active = False
-            instance.save(update_fields=["is_active", "updated_at"])
-            return
-        instance.delete()
+        retire_product(instance)
 
     @action(detail=False, methods=["get"])
     def count(self, request):

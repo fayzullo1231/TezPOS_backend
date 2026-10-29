@@ -17,6 +17,24 @@ def release_product_barcodes(product: Product) -> None:
         product.save(update_fields=["barcode", "updated_at"])
 
 
+def retire_product(product: Product) -> str:
+    """O'chirish. Sotuv/kirim bog'langan bo'lsa 500 emas, yashiriladi.
+
+    Qaytaradi: 'deleted' yoki 'hidden'.
+    """
+    from django.db import IntegrityError
+    from django.db.models.deletion import ProtectedError
+
+    release_product_barcodes(product)
+    try:
+        product.delete()
+        return "deleted"
+    except (ProtectedError, IntegrityError):
+        product.is_active = False
+        product.save(update_fields=["is_active", "updated_at"])
+        return "hidden"
+
+
 def find_product_by_barcode(tenant, code: str) -> Product | None:
     code = normalize_barcode(code)
     if not code:
