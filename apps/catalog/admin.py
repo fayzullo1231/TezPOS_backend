@@ -249,6 +249,11 @@ class ProductAdmin(admin.ModelAdmin):
     def barcode_count(self, obj):
         return str(obj.barcodes.count())
 
+    def get_deleted_objects(self, objs, request):
+        """Sotuv/kirim tarixini yig'maydi — shu yig'ish Server Error 500 berardi."""
+        items = [str(obj) for obj in objs]
+        return items, {"mahsulotlar": len(items)}, set(), []
+
     def delete_model(self, request, obj):
         from apps.catalog.barcode_lookup import retire_product
 
@@ -257,7 +262,8 @@ class ProductAdmin(admin.ModelAdmin):
     def delete_queryset(self, request, queryset):
         from apps.catalog.barcode_lookup import retire_product
 
-        for product in queryset:
+        pks = list(queryset.values_list("pk", flat=True))
+        for product in Product.objects.filter(pk__in=pks):
             retire_product(product)
 
     def save_formset(self, request, form, formset, change):

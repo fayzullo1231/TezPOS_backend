@@ -18,21 +18,34 @@ def release_product_barcodes(product: Product) -> None:
 
 
 def retire_product(product: Product) -> str:
-    """O'chirish. Sotuv/kirim bog'langan bo'lsa 500 emas, yashiriladi.
-
-    Qaytaradi: 'deleted' yoki 'hidden'.
-    """
-    from django.db import IntegrityError
-    from django.db.models.deletion import ProtectedError
+    """Kassa ro'yxatidan olish. Tarixni o'chirmaydi — shu yo'l 500 bermaydi."""
+    from apps.catalog.models import (
+        StockAuditItem,
+        StockBatch,
+        StockMovement,
+        StockReceiptItem,
+        SupplierReturnItem,
+    )
+    from apps.sales.models import SaleItem
 
     release_product_barcodes(product)
-    try:
-        product.delete()
-        return "deleted"
-    except (ProtectedError, IntegrityError):
+    referenced = any(
+        qs.exists()
+        for qs in (
+            SaleItem.objects.filter(product_id=product.pk),
+            StockReceiptItem.objects.filter(product_id=product.pk),
+            SupplierReturnItem.objects.filter(product_id=product.pk),
+            StockAuditItem.objects.filter(product_id=product.pk),
+            StockMovement.objects.filter(product_id=product.pk),
+            StockBatch.objects.filter(product_id=product.pk),
+        )
+    )
+    if referenced:
         product.is_active = False
         product.save(update_fields=["is_active", "updated_at"])
         return "hidden"
+    product.delete()
+    return "deleted"
 
 
 def find_product_by_barcode(tenant, code: str) -> Product | None:
