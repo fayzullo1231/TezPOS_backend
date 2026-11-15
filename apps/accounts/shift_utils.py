@@ -232,6 +232,77 @@ def compute_shift_summary(shift: Shift, *, floor_zero: bool = True) -> dict:
     return result
 
 
+def _sum_summary_dicts(parts: list[dict]) -> dict:
+    """Bir nechta smena hisobini do‘kon jami qilib qo‘shadi."""
+    q = Decimal("0.01")
+    keys_sum = (
+        "sales_count",
+        "sales_total",
+        "cash_sales",
+        "card_sales",
+        "credit_sales_count",
+        "debt_total",
+        "debt_collections_count",
+        "debt_collections_cash",
+        "debt_collections_card",
+        "debt_collections_total",
+        "returns_count",
+        "returns_total",
+        "cash_in",
+        "cash_out",
+        "expected_cash",
+        "expected_terminal",
+        "expected_total",
+        "raw_expected_cash",
+        "raw_expected_terminal",
+    )
+    out: dict = {k: Decimal("0") for k in keys_sum}
+    duration = 0
+    for part in parts:
+        for k in keys_sum:
+            out[k] += _dec(part.get(k))
+        duration = max(duration, int(part.get("duration_seconds") or 0))
+    result = {k: str(out[k].quantize(q)) for k in keys_sum}
+    # count maydonlari butun son
+    for k in (
+        "sales_count",
+        "credit_sales_count",
+        "debt_collections_count",
+        "returns_count",
+    ):
+        result[k] = int(out[k])
+    result["duration_seconds"] = duration
+    return result
+
+
+def compute_tenant_open_summary(tenant) -> dict | None:
+    """
+    Shu do‘kondagi BARCHA ochiq smenalar (barcha kompyuter / kassir).
+    Bir login yoki bir nechta — kunlik kassa jami shu yerda.
+    """
+    shifts = list(
+        Shift.objects.filter(tenant=tenant, status=Shift.STATUS_OPEN).order_by(
+            "opened_at"
+        )
+    )
+    if not shifts:
+        return None
+    parts = [compute_shift_summary(s) for s in shifts]
+    merged = _sum_summary_dicts(parts)
+    merged["open_shift_count"] = len(shifts)
+    merged["opening_cash"] = str(
+        sum((_dec(s.opening_cash) for s in shifts), Decimal("0")).quantize(
+            Decimal("0.01")
+        )
+    )
+    merged["opening_terminal"] = str(
+        sum((_dec(s.opening_terminal) for s in shifts), Decimal("0")).quantize(
+            Decimal("0.01")
+        )
+    )
+    return merged
+
+
 def suggested_opening_balances(tenant) -> tuple[Decimal, Decimal]:
     """Oxirgi yopilgan smenaning kutilgan qoldig'i (taklif)."""
     last_closed = (

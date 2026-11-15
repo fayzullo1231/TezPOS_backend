@@ -12,6 +12,7 @@ from apps.sales.models import Sale
 from .models import Employee, Shift, Tenant, User
 from .shift_utils import (
     compute_shift_summary,
+    compute_tenant_open_summary,
     default_opening_balances,
     suggested_opening_balances,
 )
@@ -238,6 +239,24 @@ class ShiftPreviewView(APIView):
             my_shift_data = ShiftSerializer(my_shift).data
             my_summary = compute_shift_summary(my_shift)
 
+        # Do‘kon jami: shu serverdagi BARCHA ochiq smenalar (barcha kompyuter)
+        shop_summary = compute_tenant_open_summary(tenant)
+        shop_count = int((shop_summary or {}).get("open_shift_count") or 0)
+        # Bir login / bitta ochiq smena: jami = mening smenam
+        # Bir nechta kassir: UI do‘kon jamisini ko‘rsatadi, yopish shu login smenasini yopadi
+        display_summary = shop_summary if shop_count > 1 else my_summary
+        display_shift = my_shift_data
+        if display_summary is shop_summary and my_shift_data is not None and shop_summary:
+            display_shift = {
+                **my_shift_data,
+                "opening_cash": shop_summary.get(
+                    "opening_cash", my_shift_data.get("opening_cash")
+                ),
+                "opening_terminal": shop_summary.get(
+                    "opening_terminal", my_shift_data.get("opening_terminal")
+                ),
+            }
+
         return Response(
             {
                 "my_shift_open": my_shift is not None,
@@ -250,8 +269,11 @@ class ShiftPreviewView(APIView):
                 "suggested_terminal": str(suggested_terminal),
                 "default_cash": str(default_cash),
                 "default_terminal": str(default_terminal),
-                "my_shift": my_shift_data,
-                "my_summary": my_summary,
+                "my_shift": display_shift,
+                "my_summary": display_summary,
+                "my_summary_only": my_summary,
+                "shop_summary": shop_summary,
+                "shop_open_shift_count": shop_count,
             }
         )
 
@@ -416,6 +438,16 @@ class ShiftCloseView(APIView):
         exp_term = Decimal(str(summary["expected_terminal"]))
         exp_total = exp_cash + exp_term
 
+        # Do‘kon jami (barcha ochiq smenalar) — farq faqat jami bo‘yicha
+        shop = compute_tenant_open_summary(request.user.tenant)
+        shop_count = int((shop or {}).get("open_shift_count") or 0)
+        if shop and shop_count > 1:
+            check_cash = Decimal(str(shop["expected_cash"]))
+            check_term = Decimal(str(shop["expected_terminal"]))
+            check_total = check_cash + check_term
+        else:
+            check_cash, check_term, check_total = exp_cash, exp_term, exp_total
+
         body = request.data if isinstance(request.data, dict) else {}
         ser = ShiftCloseSerializer(data=body)
         if not ser.is_valid():
@@ -434,26 +466,27 @@ class ShiftCloseView(APIView):
             if closing_terminal is None:
                 closing_terminal = data.get("actual_terminal")
             if closing_cash is None:
-                closing_cash = exp_cash
+                closing_cash = check_cash
             if closing_terminal is None:
-                closing_terminal = exp_term
+                closing_terminal = check_term
         else:
-            closing_cash, closing_terminal = exp_cash, exp_term
+            closing_cash, closing_terminal = check_cash, check_term
 
         closing_cash = Decimal(str(closing_cash or 0))
         closing_terminal = Decimal(str(closing_terminal or 0))
-        variance_cash = closing_cash - exp_cash
-        variance_terminal = closing_terminal - exp_term
-        variance_total = variance_cash + variance_terminal
+        # Kanal bo‘yicha farq saqlanadi, lekin sabab faqat JAMI uchun talab qilinadi
+        variance_cash = closing_cash - check_cash
+        variance_terminal = closing_terminal - check_term
+        variance_total = (closing_cash + closing_terminal) - check_total
         reason = (data.get("variance_reason") or "").strip()
 
         if abs(variance_total) >= Decimal("0.01") and not reason and has_close_keys:
             return Response(
                 {
-                    "detail": "Tafovut bor. Sababini yozing.",
-                    "expected_cash": str(exp_cash),
-                    "expected_terminal": str(exp_term),
-                    "expected_total": str(exp_total),
+                    "detail": "Jami kassada farq bor. Sababini yozing. Naqd/bank bo‘linishi farq emas.",
+                    "expected_cash": str(check_cash),
+                    "expected_terminal": str(check_term),
+                    "expected_total": str(check_total),
                     "closing_cash": str(closing_cash),
                     "closing_terminal": str(closing_terminal),
                     "variance_total": str(variance_total),
@@ -461,8 +494,9 @@ class ShiftCloseView(APIView):
                 status=status.HTTP_400_BAD_REQUEST,
             )
 
+        now = timezone.now()
         shift.status = Shift.STATUS_CLOSED
-        shift.closed_at = timezone.now()
+        shift.closed_at = now
         shift.closing_cash = closing_cash
         shift.closing_terminal = closing_terminal
         shift.variance_cash = variance_cash
@@ -482,6 +516,39 @@ class ShiftCloseView(APIView):
             ]
         )
 
+        # Boshqa kompyuterdagi ochiq smenalarni ham yopamiz (do‘kon kuni yakun)
+        if shop_count > 1:
+            others = Shift.objects.filter(
+                tenant=request.user.tenant,
+                status=Shift.STATUS_OPEN,
+            ).exclude(pk=shift.pk)
+            for other in others:
+                other_sum = compute_shift_summary(other)
+                oc = Decimal(str(other_sum["expected_cash"]))
+                ot = Decimal(str(other_sum["expected_terminal"]))
+                other.status = Shift.STATUS_CLOSED
+                other.closed_at = now
+                other.closing_cash = oc
+                other.closing_terminal = ot
+                other.variance_cash = Decimal("0")
+                other.variance_terminal = Decimal("0")
+                other.variance_reason = (
+                    reason or "Do‘kon smenasi yopildi"
+                )[:500]
+                other.closed_by = request.user
+                other.save(
+                    update_fields=[
+                        "status",
+                        "closed_at",
+                        "closing_cash",
+                        "closing_terminal",
+                        "variance_cash",
+                        "variance_terminal",
+                        "variance_reason",
+                        "closed_by",
+                    ]
+                )
+
         summary = compute_shift_summary(shift)
         summary["closing_cash"] = str(closing_cash)
         summary["closing_terminal"] = str(closing_terminal)
@@ -489,6 +556,9 @@ class ShiftCloseView(APIView):
         summary["variance_cash"] = str(variance_cash)
         summary["variance_terminal"] = str(variance_terminal)
         summary["variance_total"] = str(variance_total)
+        summary["expected_cash"] = str(check_cash)
+        summary["expected_terminal"] = str(check_term)
+        summary["expected_total"] = str(check_total)
         if reason:
             summary["variance_reason"] = reason
 

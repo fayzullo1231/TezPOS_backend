@@ -396,10 +396,11 @@ class CashSummaryView(APIView):
 
 
 QUICK_EXPENSE_CATEGORIES = [
+    {"id": "oylik", "label": "Ishchi oyligi / avans"},
+    {"id": "ishxona", "label": "Ishxona xarajati"},
     {"id": "paket", "label": "Paket"},
     {"id": "transport", "label": "Transport"},
     {"id": "tozalash", "label": "Tozalash"},
-    {"id": "oylik", "label": "Oylik / avans"},
     {"id": "yetkazuvchi", "label": "Yetkazib beruvchi"},
     {"id": "boshqa", "label": "Boshqa xarajat"},
 ]
