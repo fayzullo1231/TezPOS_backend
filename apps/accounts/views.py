@@ -151,16 +151,42 @@ class TenantCreateView(APIView):
 
 
 class EmployeeListCreateView(APIView):
-    """Xodimlar ro'yxati va yangi xodim qo'shish."""
+    """Xodimlar — faqat shu server (tenant). Boshqa server xodimlari ko‘rinmaydi."""
 
     def get(self, request):
         tenant = request.user.tenant
         if not tenant:
-            return Response({"results": []})
-        employees = Employee.objects.filter(tenant=tenant, is_active=True).order_by("name")
-        return Response({"results": EmployeeSerializer(employees, many=True).data})
+            return Response({"results": [], "server_name": "", "count": 0})
+        header = (request.headers.get("X-Server-Name") or "").strip()
+        if header and header.lower() != (tenant.server_name or "").lower():
+            return Response(
+                {"detail": "Server nomi token bilan mos emas."},
+                status=status.HTTP_403_FORBIDDEN,
+            )
+        employees = Employee.objects.filter(tenant=tenant, is_active=True).order_by(
+            "name"
+        )
+        return Response(
+            {
+                "results": EmployeeSerializer(employees, many=True).data,
+                "server_name": tenant.server_name,
+                "count": employees.count(),
+            }
+        )
 
     def post(self, request):
+        tenant = request.user.tenant
+        if not tenant:
+            return Response(
+                {"detail": "Server topilmadi."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        header = (request.headers.get("X-Server-Name") or "").strip()
+        if header and header.lower() != (tenant.server_name or "").lower():
+            return Response(
+                {"detail": "Server nomi token bilan mos emas."},
+                status=status.HTTP_403_FORBIDDEN,
+            )
         serializer = EmployeeSerializer(data=request.data, context={"request": request})
         serializer.is_valid(raise_exception=True)
         employee = serializer.save()

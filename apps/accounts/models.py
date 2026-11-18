@@ -66,7 +66,7 @@ class User(AbstractUser):
 
 
 class Employee(models.Model):
-    """Biznes xodimi — maosh va kassa chiqimlari uchun."""
+    """Biznes xodimi — har bir server (tenant) uchun alohida."""
 
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     tenant = models.ForeignKey(Tenant, on_delete=models.CASCADE, related_name="employees")
@@ -81,6 +81,19 @@ class Employee(models.Model):
         ordering = ["name"]
         verbose_name = "Xodim"
         verbose_name_plural = "Xodimlar"
+        constraints = [
+            models.UniqueConstraint(
+                fields=["tenant", "name"],
+                condition=models.Q(is_active=True),
+                name="uniq_active_employee_name_per_tenant",
+            )
+        ]
+        indexes = [
+            models.Index(
+                fields=["tenant", "is_active", "name"],
+                name="emp_tenant_active_name_idx",
+            ),
+        ]
 
     def __str__(self):
         return self.name

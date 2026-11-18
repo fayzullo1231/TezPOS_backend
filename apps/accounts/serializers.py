@@ -83,10 +83,18 @@ class UserSerializer(serializers.ModelSerializer):
 
 
 class EmployeeSerializer(serializers.ModelSerializer):
+    server_name = serializers.CharField(source="tenant.server_name", read_only=True)
+
     class Meta:
         model = Employee
-        fields = ["id", "name", "phone", "salary_day", "salary_amount"]
-        read_only_fields = ["id"]
+        fields = ["id", "name", "phone", "salary_day", "salary_amount", "server_name"]
+        read_only_fields = ["id", "server_name"]
+
+    def validate_name(self, value):
+        name = (value or "").strip()
+        if not name:
+            raise serializers.ValidationError("Xodim ismi majburiy.")
+        return name
 
     def validate_salary_day(self, value):
         if value < 1 or value > 31:
@@ -98,8 +106,31 @@ class EmployeeSerializer(serializers.ModelSerializer):
             raise serializers.ValidationError("Oylik summasi manfiy bo'lmasligi kerak.")
         return value
 
+    def validate(self, attrs):
+        request = self.context.get("request")
+        tenant = getattr(getattr(request, "user", None), "tenant", None)
+        if tenant is None:
+            raise serializers.ValidationError("Server topilmadi.")
+        name = attrs.get("name")
+        if name is None and self.instance is not None:
+            name = self.instance.name
+        qs = Employee.objects.filter(
+            tenant=tenant, is_active=True, name__iexact=(name or "").strip()
+        )
+        if self.instance is not None:
+            qs = qs.exclude(pk=self.instance.pk)
+        if qs.exists():
+            raise serializers.ValidationError(
+                {"name": "Bu serverda shu ismli xodim allaqachon bor."}
+            )
+        attrs["_tenant"] = tenant
+        return attrs
+
     def create(self, validated_data):
-        validated_data["tenant"] = self.context["request"].user.tenant
+        tenant = validated_data.pop("_tenant", None) or self.context["request"].user.tenant
+        if tenant is None:
+            raise serializers.ValidationError("Server topilmadi.")
+        validated_data["tenant"] = tenant
         return super().create(validated_data)
 
 
