@@ -9,7 +9,7 @@ from django.db.models import Sum
 from django.utils import timezone
 
 from apps.accounts.models import CashTransaction, Shift
-from apps.sales.models import CustomerDebtPayment, Sale, SaleReturn
+from apps.sales.models import CustomerDebtPayment, Sale, SaleItem, SaleReturn
 
 _SPLIT_RE = re.compile(
     r"Naqd:\s*([\d.,]+).*?Terminal:\s*([\d.,]+)",
@@ -89,6 +89,29 @@ def compute_shift_summary(shift: Shift, *, floor_zero: bool = True) -> dict:
         c, t = _sale_cash_card(sale)
         cash_sales += c
         card_sales += t
+
+    # Foyda / marja: FIFO partiya narxi, yo‘q bo‘lsa mahsulot cost_price
+    cost_total = Decimal("0")
+    for item in SaleItem.objects.filter(sale__in=sales_qs).select_related("product").prefetch_related(
+        "batch_allocations"
+    ):
+        batches = list(item.batch_allocations.all())
+        if batches:
+            cost_total += sum(
+                (_dec(b.quantity) * _dec(b.unit_cost) for b in batches),
+                Decimal("0"),
+            )
+        else:
+            cost_total += _dec(item.quantity) * _dec(
+                getattr(item.product, "cost_price", 0)
+            )
+    profit_total = sales_total - cost_total
+    if sales_total > 0:
+        margin_pct = (profit_total / sales_total * Decimal("100")).quantize(
+            Decimal("0.01")
+        )
+    else:
+        margin_pct = Decimal("0")
 
     # Qarzga berilgan (kassaga TA'SIR QILMAYDI)
     credit_qs = sales_qs.filter(debt_amount__gt=0)
@@ -212,6 +235,9 @@ def compute_shift_summary(shift: Shift, *, floor_zero: bool = True) -> dict:
         "returns_total": str(returns_total.quantize(q)),
         "cash_in": str((cash_in + cash_in_card).quantize(q)),
         "cash_out": str(cash_out.quantize(q)),
+        "cost_total": str(cost_total.quantize(q)),
+        "profit_total": str(profit_total.quantize(q)),
+        "margin_percent": str(margin_pct),
         "expected_cash": str(expected_cash.quantize(q)),
         "expected_terminal": str(expected_terminal.quantize(q)),
         "expected_total": str(expected_total.quantize(q)),
@@ -250,6 +276,8 @@ def _sum_summary_dicts(parts: list[dict]) -> dict:
         "returns_total",
         "cash_in",
         "cash_out",
+        "cost_total",
+        "profit_total",
         "expected_cash",
         "expected_terminal",
         "expected_total",
@@ -272,6 +300,12 @@ def _sum_summary_dicts(parts: list[dict]) -> dict:
     ):
         result[k] = int(out[k])
     result["duration_seconds"] = duration
+    if out["sales_total"] > 0:
+        result["margin_percent"] = str(
+            (out["profit_total"] / out["sales_total"] * Decimal("100")).quantize(q)
+        )
+    else:
+        result["margin_percent"] = "0.00"
     return result
 
 
