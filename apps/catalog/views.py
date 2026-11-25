@@ -234,12 +234,16 @@ class ProductViewSet(TenantMixin, viewsets.ModelViewSet):
 
     @action(detail=True, methods=["get"], url_path="today-sales")
     def today_sales(self, request, pk=None):
-        """Bugungi sotuvlar: chek, vaqt, miqdor, sotuvdan oldin/keyin qoldiq."""
+        """Kunlik sotuvlar: chek, vaqt, miqdor, sotuvdan oldin/keyin qoldiq.
+
+        ?date=YYYY-MM-DD — ixtiyoriy sana (default: bugun).
+        """
         from collections import OrderedDict
         from datetime import datetime, time
         from decimal import Decimal
 
         from django.utils import timezone
+        from django.utils.dateparse import parse_date
 
         from apps.catalog.models import StockMovement
         from apps.sales.models import Sale
@@ -247,14 +251,17 @@ class ProductViewSet(TenantMixin, viewsets.ModelViewSet):
         product = self.get_object()
         tenant = request.user.tenant
         today = timezone.localdate()
-        start = timezone.make_aware(datetime.combine(today, time.min))
+        day = parse_date((request.query_params.get("date") or "").strip()) or today
+        start = timezone.make_aware(datetime.combine(day, time.min))
+        end = timezone.make_aware(datetime.combine(day, time.max))
 
         OUT = {
             StockMovement.TYPE_SALE,
             StockMovement.TYPE_RETURN_CANCEL,
             StockMovement.TYPE_SUPPLIER_RETURN,
         }
-        movements = list(
+        # Joriy qoldiqdan kun boshigacha qayta hisoblash uchun kun boshidan hozirgacha
+        movements_from_start = list(
             StockMovement.objects.filter(
                 tenant=tenant,
                 product_id=product.id,
@@ -264,16 +271,18 @@ class ProductViewSet(TenantMixin, viewsets.ModelViewSet):
 
         current = Decimal(str(product.quantity or 0))
         stock = current
-        for m in reversed(movements):
+        for m in reversed(movements_from_start):
             q = Decimal(str(m.quantity or 0))
             if m.movement_type in OUT:
                 stock += q
             else:
                 stock -= q
 
+        day_movements = [m for m in movements_from_start if m.created_at <= end]
+
         sales_map: OrderedDict[str, dict] = OrderedDict()
         running = stock
-        for m in movements:
+        for m in day_movements:
             q = Decimal(str(m.quantity or 0))
             before = running
             if m.movement_type in OUT:
@@ -333,7 +342,7 @@ class ProductViewSet(TenantMixin, viewsets.ModelViewSet):
                 "product_name": product.name,
                 "current_stock": str(current),
                 "sold_today": str(sold_today),
-                "date": str(today),
+                "date": str(day),
                 "sales": rows,
             }
         )
