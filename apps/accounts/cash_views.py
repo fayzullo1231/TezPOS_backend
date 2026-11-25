@@ -59,8 +59,8 @@ def _build_ledger_entries(tenant, start, end, search="", *, limit=LEDGER_HARD_LI
             status=Sale.STATUS_COMPLETED,
             completed_at__gte=start,
             completed_at__lte=end,
-            paid_amount__gt=0,
         )
+        .filter(Q(paid_amount__gt=0) | Q(debt_amount__gt=0))
         .select_related("user")
         .only(
             "id",
@@ -68,6 +68,7 @@ def _build_ledger_entries(tenant, start, end, search="", *, limit=LEDGER_HARD_LI
             "completed_at",
             "customer_name",
             "paid_amount",
+            "debt_amount",
             "payment_type",
             "user_id",
             "user__username",
@@ -89,8 +90,19 @@ def _build_ledger_entries(tenant, start, end, search="", *, limit=LEDGER_HARD_LI
                 | Q(user__last_name__icontains=q)
             )
     for sale in sales_qs[:limit]:
-        amount = sale.paid_amount or Decimal("0")
+        paid = sale.paid_amount or Decimal("0")
+        debt = sale.debt_amount or Decimal("0")
+        # Nasiya: paid=0 bo'lsa ham qarz summasini ko'rsatamiz (kassa ta'siri faqat paid)
+        amount = paid if paid > 0 else debt
         desc = (sale.customer_name or "Tashrif buyuruvchi").strip() or "Tashrif buyuruvchi"
+        if debt > 0:
+            desc = f"{desc} — nasiya {debt}"
+            category = "Nasiyaga savdo"
+        else:
+            category = "Mijozdan tushum"
+        pay = sale.payment_type
+        if debt > 0 and pay not in ("credit", "mixed"):
+            pay = "credit"
         entries.append(
             {
                 "id": f"sale-{sale.id}",
@@ -98,12 +110,13 @@ def _build_ledger_entries(tenant, start, end, search="", *, limit=LEDGER_HARD_LI
                 "source": "sale",
                 "created_at": sale.completed_at.isoformat() if sale.completed_at else "",
                 "cashier": _cashier_name(sale.user),
-                "category": "Mijozdan tushum",
+                "category": category,
                 "amount": str(amount),
-                "signed_amount": str(amount),
+                "signed_amount": str(paid),
+                "debt_amount": str(debt),
                 "description": desc,
-                "payment_method": sale.payment_type,
-                "payment_label": PAYMENT_LABELS.get(sale.payment_type, sale.payment_type),
+                "payment_method": pay,
+                "payment_label": PAYMENT_LABELS.get(pay, pay),
             }
         )
 
@@ -178,6 +191,7 @@ def _build_ledger_entries(tenant, start, end, search="", *, limit=LEDGER_HARD_LI
             "transaction_type",
             "category",
             "description",
+            "party_type",
             "party_name",
             "payment_method",
             "user_id",
@@ -211,8 +225,9 @@ def _build_ledger_entries(tenant, start, end, search="", *, limit=LEDGER_HARD_LI
         desc = (tx.description or "").strip()
         if tx.party_name:
             desc = f"{tx.party_name}" + (f" — {desc}" if desc else "")
-        if not desc:
-            desc = "—"
+        # Maqsad ko'rinsin: izoh bo'sh bo'lsa kategoriya (Kirim/Chiqim/…)
+        if not desc or desc == "—":
+            desc = (tx.category or "").strip() or "—"
         entries.append(
             {
                 "id": str(tx.id),
@@ -226,6 +241,8 @@ def _build_ledger_entries(tenant, start, end, search="", *, limit=LEDGER_HARD_LI
                 "description": desc,
                 "payment_method": tx.payment_method,
                 "payment_label": PAYMENT_LABELS.get(tx.payment_method, tx.payment_method),
+                "party_type": tx.party_type or "",
+                "party_name": tx.party_name or "",
             }
         )
 
@@ -254,8 +271,7 @@ def _ledger_count(tenant, start, end, search=""):
         status=Sale.STATUS_COMPLETED,
         completed_at__gte=start,
         completed_at__lte=end,
-        paid_amount__gt=0,
-    )
+    ).filter(Q(paid_amount__gt=0) | Q(debt_amount__gt=0))
     returns_qs = SaleReturn.objects.filter(
         tenant=tenant,
         status=SaleReturn.STATUS_COMPLETED,
