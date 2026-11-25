@@ -1,5 +1,5 @@
 from django.db.models import Q
-from django.db.models import Count, Max
+from django.db.models import Count, Max, Sum
 from django.http import HttpResponse
 from rest_framework import status, viewsets
 from rest_framework.decorators import action
@@ -181,8 +181,7 @@ class ProductViewSet(TenantMixin, viewsets.ModelViewSet):
         if self.action == "list":
             if self.request.query_params.get("all") == "true":
                 return qs
-            if not search and not barcode and not category:
-                return qs.filter(is_active=True)[:200]
+            return qs.filter(is_active=True)
         return qs.filter(is_active=True)
 
     def perform_destroy(self, instance):
@@ -215,18 +214,127 @@ class ProductViewSet(TenantMixin, viewsets.ModelViewSet):
             max_updated=Max("updated_at"),
             total=Count("id"),
             active_total=Count("id", filter=Q(is_active=True)),
+            qty_sum=Sum("quantity"),
         )
         max_updated = agg["max_updated"]
+        # qty_sum: har bir sotuv/qaytarishdan keyin revision o'zgaradi (multi-kassa)
         revision_parts = [
             max_updated.isoformat() if max_updated else "0",
             str(agg["total"] or 0),
             str(agg["active_total"] or 0),
+            str(agg["qty_sum"] if agg["qty_sum"] is not None else 0),
         ]
         return Response(
             {
                 "revision": ":".join(revision_parts),
                 "updated_at": max_updated.isoformat() if max_updated else None,
                 "product_count": agg["active_total"] or 0,
+            }
+        )
+
+    @action(detail=True, methods=["get"], url_path="today-sales")
+    def today_sales(self, request, pk=None):
+        """Bugungi sotuvlar: chek, vaqt, miqdor, sotuvdan oldin/keyin qoldiq."""
+        from collections import OrderedDict
+        from datetime import datetime, time
+        from decimal import Decimal
+
+        from django.utils import timezone
+
+        from apps.catalog.models import StockMovement
+        from apps.sales.models import Sale
+
+        product = self.get_object()
+        tenant = request.user.tenant
+        today = timezone.localdate()
+        start = timezone.make_aware(datetime.combine(today, time.min))
+
+        OUT = {
+            StockMovement.TYPE_SALE,
+            StockMovement.TYPE_RETURN_CANCEL,
+            StockMovement.TYPE_SUPPLIER_RETURN,
+        }
+        movements = list(
+            StockMovement.objects.filter(
+                tenant=tenant,
+                product_id=product.id,
+                created_at__gte=start,
+            ).order_by("created_at", "id")
+        )
+
+        current = Decimal(str(product.quantity or 0))
+        stock = current
+        for m in reversed(movements):
+            q = Decimal(str(m.quantity or 0))
+            if m.movement_type in OUT:
+                stock += q
+            else:
+                stock -= q
+
+        sales_map: OrderedDict[str, dict] = OrderedDict()
+        running = stock
+        for m in movements:
+            q = Decimal(str(m.quantity or 0))
+            before = running
+            if m.movement_type in OUT:
+                running -= q
+            else:
+                running += q
+            after = running
+            if m.movement_type != StockMovement.TYPE_SALE or not m.reference_id:
+                continue
+            key = str(m.reference_id)
+            row = sales_map.get(key)
+            if not row:
+                sales_map[key] = {
+                    "sale_id": key,
+                    "quantity": q,
+                    "stock_before": before,
+                    "stock_after": after,
+                    "created_at": m.created_at,
+                }
+            else:
+                row["quantity"] += q
+                row["stock_after"] = after
+
+        sale_ids = list(sales_map.keys())
+        sale_meta = {}
+        if sale_ids:
+            for s in Sale.objects.filter(tenant=tenant, id__in=sale_ids).only(
+                "id", "receipt_number", "completed_at", "created_at"
+            ):
+                sale_meta[str(s.id)] = s
+
+        sold_today = Decimal("0")
+        rows = []
+        for key, row in sales_map.items():
+            sold_today += row["quantity"]
+            s = sale_meta.get(key)
+            when = None
+            if s:
+                when = s.completed_at or s.created_at
+            when = when or row["created_at"]
+            rows.append(
+                {
+                    "sale_id": key,
+                    "receipt_number": s.receipt_number if s else None,
+                    "completed_at": when.isoformat() if when else None,
+                    "quantity": str(row["quantity"]),
+                    "stock_before": str(row["stock_before"]),
+                    "stock_after": str(row["stock_after"]),
+                }
+            )
+
+        # Eng yangisi yuqorida
+        rows.reverse()
+        return Response(
+            {
+                "product_id": str(product.id),
+                "product_name": product.name,
+                "current_stock": str(current),
+                "sold_today": str(sold_today),
+                "date": str(today),
+                "sales": rows,
             }
         )
 
