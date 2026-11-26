@@ -237,16 +237,19 @@ class ProductViewSet(TenantMixin, viewsets.ModelViewSet):
         """Kunlik sotuvlar: chek, vaqt, miqdor, sotuvdan oldin/keyin qoldiq.
 
         ?date=YYYY-MM-DD — ixtiyoriy sana (default: bugun).
+        Asosiy manba: SaleItem (serverda saqlangan sotuvlar).
+        StockMovement — oldin/keyin qoldiq uchun.
         """
         from collections import OrderedDict
         from datetime import datetime, time
         from decimal import Decimal
 
+        from django.db.models import Q
         from django.utils import timezone
         from django.utils.dateparse import parse_date
 
         from apps.catalog.models import StockMovement
-        from apps.sales.models import Sale
+        from apps.sales.models import Sale, SaleItem
 
         product = self.get_object()
         tenant = request.user.tenant
@@ -254,13 +257,13 @@ class ProductViewSet(TenantMixin, viewsets.ModelViewSet):
         day = parse_date((request.query_params.get("date") or "").strip()) or today
         start = timezone.make_aware(datetime.combine(day, time.min))
         end = timezone.make_aware(datetime.combine(day, time.max))
+        current = Decimal(str(product.quantity or 0))
 
         OUT = {
             StockMovement.TYPE_SALE,
             StockMovement.TYPE_RETURN_CANCEL,
             StockMovement.TYPE_SUPPLIER_RETURN,
         }
-        # Joriy qoldiqdan kun boshigacha qayta hisoblash uchun kun boshidan hozirgacha
         movements_from_start = list(
             StockMovement.objects.filter(
                 tenant=tenant,
@@ -268,21 +271,18 @@ class ProductViewSet(TenantMixin, viewsets.ModelViewSet):
                 created_at__gte=start,
             ).order_by("created_at", "id")
         )
-
-        current = Decimal(str(product.quantity or 0))
-        stock = current
+        stock_at_day_start = current
         for m in reversed(movements_from_start):
             q = Decimal(str(m.quantity or 0))
             if m.movement_type in OUT:
-                stock += q
+                stock_at_day_start += q
             else:
-                stock -= q
+                stock_at_day_start -= q
 
-        day_movements = [m for m in movements_from_start if m.created_at <= end]
-
-        sales_map: OrderedDict[str, dict] = OrderedDict()
-        running = stock
-        for m in day_movements:
+        # Harakatlar bo‘yicha sale_id → oldin/keyin
+        move_meta: dict[str, dict] = {}
+        running = stock_at_day_start
+        for m in [x for x in movements_from_start if x.created_at <= end]:
             q = Decimal(str(m.quantity or 0))
             before = running
             if m.movement_type in OUT:
@@ -293,40 +293,111 @@ class ProductViewSet(TenantMixin, viewsets.ModelViewSet):
             if m.movement_type != StockMovement.TYPE_SALE or not m.reference_id:
                 continue
             key = str(m.reference_id)
-            row = sales_map.get(key)
+            row = move_meta.get(key)
             if not row:
-                sales_map[key] = {
-                    "sale_id": key,
+                move_meta[key] = {
                     "quantity": q,
                     "stock_before": before,
                     "stock_after": after,
-                    "created_at": m.created_at,
                 }
             else:
                 row["quantity"] += q
                 row["stock_after"] = after
 
-        sale_ids = list(sales_map.keys())
-        sale_meta = {}
-        if sale_ids:
-            for s in Sale.objects.filter(tenant=tenant, id__in=sale_ids).only(
+        # Server sotuvlari (asosiy) — offline sync ham shu yerda
+        items = (
+            SaleItem.objects.filter(
+                sale__tenant=tenant,
+                sale__status=Sale.STATUS_COMPLETED,
+                product_id=product.id,
+            )
+            .filter(
+                Q(sale__completed_at__gte=start, sale__completed_at__lte=end)
+                | Q(
+                    sale__completed_at__isnull=True,
+                    sale__created_at__gte=start,
+                    sale__created_at__lte=end,
+                )
+            )
+            .select_related("sale")
+            .only(
+                "id",
+                "quantity",
+                "product_id",
+                "sale_id",
+                "sale__receipt_number",
+                "sale__completed_at",
+                "sale__created_at",
+            )
+            .order_by("sale__completed_at", "sale__created_at", "id")
+        )
+
+        sales_map: OrderedDict[str, dict] = OrderedDict()
+        approx_stock = stock_at_day_start
+        for it in items:
+            sale = it.sale
+            key = str(sale.id)
+            qty = Decimal(str(it.quantity or 0))
+            if qty <= 0:
+                continue
+            mm = move_meta.get(key) or move_meta.get(str(sale.pk))
+            if mm:
+                before = mm["stock_before"]
+                after = mm["stock_after"]
+                qty_sum = mm["quantity"]
+            else:
+                before = approx_stock
+                after = approx_stock - qty
+                approx_stock = after
+                qty_sum = qty
+            row = sales_map.get(key)
+            when = sale.completed_at or sale.created_at
+            if not row:
+                sales_map[key] = {
+                    "sale_id": key,
+                    "receipt_number": sale.receipt_number,
+                    "completed_at": when,
+                    "quantity": qty_sum if mm else qty,
+                    "stock_before": before,
+                    "stock_after": after,
+                }
+            elif not mm:
+                row["quantity"] += qty
+                row["stock_after"] = approx_stock
+
+        # Faqat harakat bor, SaleItem yo‘q (eski yozuv) — qo‘shamiz
+        for key, mm in move_meta.items():
+            if key in sales_map:
+                continue
+            sales_map[key] = {
+                "sale_id": key,
+                "receipt_number": None,
+                "completed_at": None,
+                "quantity": mm["quantity"],
+                "stock_before": mm["stock_before"],
+                "stock_after": mm["stock_after"],
+            }
+
+        if any(r["receipt_number"] is None for r in sales_map.values()):
+            missing = [k for k, r in sales_map.items() if r["receipt_number"] is None]
+            for s in Sale.objects.filter(tenant=tenant, id__in=missing).only(
                 "id", "receipt_number", "completed_at", "created_at"
             ):
-                sale_meta[str(s.id)] = s
+                row = sales_map.get(str(s.id))
+                if not row:
+                    continue
+                row["receipt_number"] = s.receipt_number
+                row["completed_at"] = s.completed_at or s.created_at
 
         sold_today = Decimal("0")
         rows = []
         for key, row in sales_map.items():
-            sold_today += row["quantity"]
-            s = sale_meta.get(key)
-            when = None
-            if s:
-                when = s.completed_at or s.created_at
-            when = when or row["created_at"]
+            sold_today += Decimal(str(row["quantity"]))
+            when = row.get("completed_at")
             rows.append(
                 {
                     "sale_id": key,
-                    "receipt_number": s.receipt_number if s else None,
+                    "receipt_number": row.get("receipt_number"),
                     "completed_at": when.isoformat() if when else None,
                     "quantity": str(row["quantity"]),
                     "stock_before": str(row["stock_before"]),
@@ -334,8 +405,10 @@ class ProductViewSet(TenantMixin, viewsets.ModelViewSet):
                 }
             )
 
-        # Eng yangisi yuqorida
-        rows.reverse()
+        rows.sort(
+            key=lambda r: r["completed_at"] or "",
+            reverse=True,
+        )
         return Response(
             {
                 "product_id": str(product.id),
